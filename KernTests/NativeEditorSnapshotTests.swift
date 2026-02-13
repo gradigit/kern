@@ -1,7 +1,7 @@
 import AppKit
 import SnapshotTesting
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 final class NativeEditorSnapshotTests: XCTestCase {
     @MainActor

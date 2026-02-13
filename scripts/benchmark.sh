@@ -1,19 +1,21 @@
 #!/bin/bash
-# Kern vs MarkText Benchmark Script
+# KernTextKit vs MarkText Benchmark Script
 # Compares cold start, memory, tab switching, file open latency, and large file handling.
 # Usage: ./scripts/benchmark.sh
 #
-# If MarkText is not installed, runs Kern-only benchmarks.
+# If MarkText is not installed, runs KernTextKit-only benchmarks.
 # To include MarkText, pass its .app path:
 #   MARKTEXT_PATH="/path/to/MarkText.app" ./scripts/benchmark.sh
 
 set -euo pipefail
 
-KERN_APP="Kern"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+KERN_APP="KernTextKit"
 MARKTEXT_APP="MarkText"
-STRESS_FILE="/Users/aaaaa/Projects/Kern/test-fixtures/stress-test.md"
-LARGE_FILE="/tmp/kern-benchmark-large.md"
-RESULTS_FILE="/tmp/kern-benchmark-results.md"
+STRESS_FILE="$REPO_ROOT/test-fixtures/stress-test.md"
+LARGE_FILE="/tmp/kerntextkit-benchmark-large.md"
+RESULTS_FILE="/tmp/kerntextkit-benchmark-results.md"
 RUNS=3  # Number of iterations for averaged measurements
 
 # High-res timestamp in seconds

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 /// Forward-looking spec tests for Markdown features not yet implemented by the native TextKit codec.
 ///

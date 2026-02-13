@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 final class NativeEditorRenderPerformanceTests: XCTestCase {
     @MainActor
@@ -27,4 +27,3 @@ final class NativeEditorRenderPerformanceTests: XCTestCase {
         }
     }
 }
-

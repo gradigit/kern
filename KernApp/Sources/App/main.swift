@@ -3,7 +3,7 @@ import os
 
 /// Monotonic process start time (nanoseconds) for perf logging.
 let processStartNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-private let signposter = OSSignposter(subsystem: "com.kern.app", category: "Launch")
+private let signposter = OSSignposter(subsystem: "com.kern.textkit", category: "Launch")
 let launchInterval = signposter.beginInterval("AppLaunch")
 
 func msSinceStart() -> String {
@@ -12,11 +12,6 @@ func msSinceStart() -> String {
 }
 
 NSLog("[Perf] Process start at 0.0ms")
-
-// Allow forcing the native editor prototype (useful for UI tests / automation).
-if ProcessInfo.processInfo.environment["KERN_USE_NATIVE_EDITOR"] == "1" {
-    UserDefaults.standard.set(true, forKey: "useNativeEditorPrototype")
-}
 
 // Native editor preferences (UI tests / automation).
 if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_EXPORT_DIALECT"] {

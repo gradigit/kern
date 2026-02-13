@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 final class NativeMarkdownCodecAttributeTests: XCTestCase {
     @MainActor

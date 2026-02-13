@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 final class NativeMarkdownCodecPerformanceTests: XCTestCase {
     @MainActor

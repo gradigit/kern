@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 /// Deterministic fuzz tests that generate many small Markdown documents from seeds.
 /// These are gated behind `KERN_ENABLE_EXHAUSTIVE_TESTS=1` to keep the default test run fast.
@@ -223,4 +223,3 @@ private struct LCRNG {
         return nextInt(n) == 0
     }
 }
-

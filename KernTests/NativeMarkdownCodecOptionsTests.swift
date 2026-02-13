@@ -1,5 +1,5 @@
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 final class NativeMarkdownCodecOptionsTests: XCTestCase {
     @MainActor

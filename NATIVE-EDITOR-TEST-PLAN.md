@@ -140,12 +140,12 @@ Even for a local editor, we want robustness against:
 
 Unit tests:
 ```bash
-xcodebuild -project Kern.xcodeproj -scheme Kern test
+xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit test
 ```
 
 UI tests:
 ```bash
-xcodebuild -project Kern.xcodeproj -scheme KernUI test
+xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKitUI test
 ```
 
 Recommended runner (collects xcresults + attachments):

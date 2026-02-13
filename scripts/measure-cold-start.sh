@@ -1,111 +1,99 @@
 #!/bin/bash
-# Measure Kern cold start timing (Release build)
-# Runs N iterations, captures NSLog [Perf] lines, reports median
+# measure-cold-start.sh — KernTextKit cold start timing (Release build)
+#
+# Measures time from process start to `applicationDidFinishLaunching end`.
+#
+# Usage:
+#   ./scripts/measure-cold-start.sh [iterations] [wait_seconds]
+#
+# Notes:
+# - This relies on NSLog "[Perf]" lines emitted by the app.
+# - Requires the app to be built in Release at least once.
 
 set -euo pipefail
 
-KERN_APP="/Users/aaaaa/Library/Developer/Xcode/DerivedData/Kern-fmshysujrcibpcdmfoxzgubdswre/Build/Products/Release/Kern.app"
-KERN_BIN="$KERN_APP/Contents/MacOS/Kern"
-TEST_FILE="/Users/aaaaa/Projects/Kern/test-fixtures/stress-test.md"
-ITERATIONS=${1:-5}
-WAIT_SECONDS=8  # Time to wait for editor to fully load
+cd "$(dirname "$0")/.."
 
-echo "=== Kern Cold Start Benchmark (Release) ==="
-echo "Binary: $KERN_BIN"
+APP_NAME="KernTextKit"
+PROCESS_NAME="KernTextKit"
+ITERATIONS=${1:-5}
+WAIT_SECONDS=${2:-4}
+
+TEST_FILE="${TEST_FILE:-$(pwd)/test-fixtures/stress-test.md}"
+
+APP_PATH="${APP_PATH:-}"
+if [ -z "$APP_PATH" ]; then
+  APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData/${APP_NAME}-*/Build/Products/Release/${APP_NAME}.app" -maxdepth 0 2>/dev/null | head -1 || true)"
+fi
+
+if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+  echo "ERROR: Cannot find ${APP_NAME}.app (Release) in DerivedData." >&2
+  echo "       Build first: xcodebuild -project ${APP_NAME}.xcodeproj -scheme ${APP_NAME} -configuration Release build" >&2
+  exit 1
+fi
+
+if [ ! -f "$TEST_FILE" ]; then
+  echo "ERROR: TEST_FILE not found: $TEST_FILE" >&2
+  exit 1
+fi
+
+echo "=== ${APP_NAME} Cold Start Benchmark (Release) ==="
+echo "App: $APP_PATH"
 echo "Test file: $TEST_FILE"
 echo "Iterations: $ITERATIONS"
+echo "Wait seconds: $WAIT_SECONDS"
 echo ""
 
-declare -a editor_ready_times
-declare -a set_markdown_times
+declare -a did_finish_times
 
-for i in $(seq 1 $ITERATIONS); do
-    echo "--- Run $i of $ITERATIONS ---"
+sort_and_median() {
+  local -a sorted
+  IFS=$'\n' sorted=($(printf '%s\n' "$@" | sort -n))
+  local count=${#sorted[@]}
+  if [ $count -eq 0 ]; then
+    echo "N/A"
+    return
+  fi
+  local mid=$((count / 2))
+  echo "${sorted[$mid]}"
+}
 
-    # Kill any existing Kern
-    pkill -x Kern 2>/dev/null || true
-    sleep 1
+for i in $(seq 1 "$ITERATIONS"); do
+  echo "--- Run $i of $ITERATIONS ---"
 
-    # Launch Kern with test file, capture stderr (NSLog goes to unified log)
-    # Use open -a to simulate real user launch
-    LOG_FILE="/tmp/kern-bench-$i.log"
+  pkill -x "$PROCESS_NAME" 2>/dev/null || true
+  sleep 1
 
-    # Start log capture BEFORE launching
-    log stream --predicate 'process == "Kern" AND eventMessage CONTAINS "[Perf]"' --style compact > "$LOG_FILE" 2>/dev/null &
-    LOG_PID=$!
-    sleep 0.5
+  LOG_FILE="/tmp/kerntextkit-cold-start-$i.log"
 
-    # Launch the app with the test file
-    open "$KERN_APP" --args "$TEST_FILE"
+  log stream --predicate "process == \"$PROCESS_NAME\" AND eventMessage CONTAINS \"[Perf]\"" --style compact > "$LOG_FILE" 2>/dev/null &
+  LOG_PID=$!
+  sleep 0.5
 
-    # Wait for editor to load
-    sleep $WAIT_SECONDS
+  open -n "$APP_PATH" --args "$TEST_FILE"
+  sleep "$WAIT_SECONDS"
 
-    # Stop log capture
-    kill $LOG_PID 2>/dev/null || true
-    wait $LOG_PID 2>/dev/null || true
+  kill "$LOG_PID" 2>/dev/null || true
+  wait "$LOG_PID" 2>/dev/null || true
 
-    # Extract timing
-    echo "Log output:"
-    cat "$LOG_FILE"
+  # Extract the latest "applicationDidFinishLaunching end" timestamp.
+  t=$(grep -o 'applicationDidFinishLaunching end at [0-9.]*ms' "$LOG_FILE" | tail -1 | grep -o '[0-9.]*' || true)
+  if [ -n "$t" ]; then
+    echo "  applicationDidFinishLaunching end: ${t}ms"
+    did_finish_times+=("$t")
+  else
+    echo "  applicationDidFinishLaunching end: NOT FOUND"
+  fi
 
-    # Parse editorReady time
-    er_time=$(grep -o 'editorReady at [0-9.]*ms' "$LOG_FILE" | head -1 | grep -o '[0-9.]*' || echo "")
-    sm_time=$(grep -o 'setMarkdown complete at [0-9.]*ms' "$LOG_FILE" | head -1 | grep -o '[0-9.]*' || echo "")
-
-    if [ -n "$er_time" ]; then
-        echo "  editorReady: ${er_time}ms"
-        editor_ready_times+=("$er_time")
-    else
-        echo "  editorReady: NOT FOUND"
-    fi
-
-    if [ -n "$sm_time" ]; then
-        echo "  setMarkdown: ${sm_time}ms"
-        set_markdown_times+=("$sm_time")
-    else
-        echo "  setMarkdown: NOT FOUND"
-    fi
-
-    echo ""
-
-    # Kill Kern for next iteration
-    pkill -x Kern 2>/dev/null || true
-    sleep 1
+  pkill -x "$PROCESS_NAME" 2>/dev/null || true
+  sleep 1
+  echo ""
 done
 
 echo "=== Results ==="
-echo ""
-
-# Sort and find median
-sort_and_median() {
-    local -a sorted
-    IFS=$'\n' sorted=($(printf '%s\n' "$@" | sort -n))
-    local count=${#sorted[@]}
-    if [ $count -eq 0 ]; then
-        echo "N/A"
-        return
-    fi
-    local mid=$((count / 2))
-    echo "${sorted[$mid]}"
-}
-
-echo "editorReady times: ${editor_ready_times[*]:-N/A}"
-if [ ${#editor_ready_times[@]} -gt 0 ]; then
-    median_er=$(sort_and_median "${editor_ready_times[@]}")
-    echo "  Median: ${median_er}ms"
+echo "applicationDidFinishLaunching end times: ${did_finish_times[*]:-N/A}"
+if [ ${#did_finish_times[@]} -gt 0 ]; then
+  median=$(sort_and_median "${did_finish_times[@]}")
+  echo "  Median: ${median}ms"
 fi
 
-echo ""
-echo "setMarkdown times: ${set_markdown_times[*]:-N/A}"
-if [ ${#set_markdown_times[@]} -gt 0 ]; then
-    median_sm=$(sort_and_median "${set_markdown_times[@]}")
-    echo "  Median: ${median_sm}ms"
-fi
-
-echo ""
-echo "Comparison (Debug baseline pre-optimization):"
-echo "  editorReady: ~530-600ms"
-echo "  Phase A Debug: ~365ms"
-echo ""
-echo "Done."

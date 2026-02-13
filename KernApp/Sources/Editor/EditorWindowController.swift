@@ -24,15 +24,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.isRestorable = false
 
-        let editorVC: NSViewController
-        if UserDefaults.standard.bool(forKey: "useNativeEditorPrototype") {
-            editorVC = NativeEditorViewController()
-        } else {
-            editorVC = EditorViewController()
-        }
+        let editorVC: NSViewController = NativeEditorViewController()
         window.contentViewController = editorVC
 
-        // Ensure the webView fills the content area
+        // Ensure the editor view fills the content area.
         if let contentView = window.contentView {
             editorVC.view.frame = contentView.bounds
         }
@@ -60,29 +55,18 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate {
         super.windowDidLoad()
 
         if let document {
-            if contentViewController is NativeEditorViewController {
-                window?.title = "\(document.displayName) (Native Prototype)"
-            } else {
-                window?.title = document.displayName
-            }
+            window?.title = document.displayName
         }
     }
 
     // MARK: - NSWindowDelegate
 
     func windowDidBecomeMain(_ notification: Notification) {
-        if let editorVC = contentViewController as? EditorViewController {
-            if editorVC.isVirtualized {
-                editorVC.rehydrate()
-            }
-            EditorReusePool.shared.markActive(editorVC)
-        }
+        // no-op
     }
 
     func windowWillClose(_ notification: Notification) {
-        if let editorVC = contentViewController as? EditorViewController {
-            editorVC.releaseWebView()
-        }
+        // no-op
     }
 
     // MARK: - Test Helpers

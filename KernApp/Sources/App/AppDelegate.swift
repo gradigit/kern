@@ -10,31 +10,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "keepRunningInBackground") }
     }
 
-    private var useNativeEditorPrototype: Bool {
-        get { UserDefaults.standard.bool(forKey: "useNativeEditorPrototype") }
-        set { UserDefaults.standard.set(newValue, forKey: "useNativeEditorPrototype") }
-    }
-
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSLog("[Perf] applicationWillFinishLaunching at %@ms", msSinceStart())
-        // Must warm pool BEFORE applicationDidFinishLaunching,
-        // because macOS auto-opens an untitled document (applicationShouldOpenUntitledFile)
-        // between willFinishLaunching and didFinishLaunching.
-        if !useNativeEditorPrototype {
-            EditorReusePool.shared.warmUp()
-        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[Perf] applicationDidFinishLaunching start at %@ms", msSinceStart())
 
-        AppearanceManager.shared.startObserving()
         buildMenuBar()
 
         NSLog("[Perf] applicationDidFinishLaunching end at %@ms", msSinceStart())
 
         // Defer untitled document creation to the next run loop iteration.
-        // By then, any Apple Event from `open -a Kern file.md` will have triggered
+        // By then, any Apple Event from `open -a KernTextKit file.md` will have triggered
         // KernDocumentController.openDocument(withContentsOf:), setting hasOpenedDocument.
         DispatchQueue.main.async { [weak self] in
             self?.openUntitledIfNeeded()
@@ -144,11 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func toggleNativeEditorPrototype(_ sender: NSMenuItem) {
-        useNativeEditorPrototype.toggle()
-        // Only affects newly created windows. Existing windows keep their editor type.
-    }
-
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if keepRunning {
             for window in NSApp.windows where window.isVisible {
@@ -176,11 +159,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenuBar() {
         let mainMenu = NSMenu()
+        let appName = ProcessInfo.processInfo.processName
 
         // App menu
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About Kern", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         let keepRunningItem = NSMenuItem(
             title: "Keep Running in Background",
@@ -188,14 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         appMenu.addItem(keepRunningItem)
-        let nativeEditorItem = NSMenuItem(
-            title: "Use Native Editor Prototype",
-            action: #selector(toggleNativeEditorPrototype(_:)),
-            keyEquivalent: ""
-        )
-        appMenu.addItem(nativeEditorItem)
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Kern", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -228,11 +206,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Find submenu
         let findMenuItem = NSMenuItem()
         let findMenu = NSMenu(title: "Find")
-        findMenu.addItem(withTitle: "Find\u{2026}", action: #selector(EditorViewController.showFind(_:)), keyEquivalent: "f")
-        let findReplaceItem = NSMenuItem(title: "Find and Replace\u{2026}", action: #selector(EditorViewController.showFindReplace(_:)), keyEquivalent: "h")
+        findMenu.addItem(withTitle: "Find\u{2026}", action: #selector(NativeEditorViewController.showFind(_:)), keyEquivalent: "f")
+        let findReplaceItem = NSMenuItem(title: "Find and Replace\u{2026}", action: #selector(NativeEditorViewController.showFindReplace(_:)), keyEquivalent: "h")
         findReplaceItem.keyEquivalentModifierMask = [.command, .shift]
         findMenu.addItem(findReplaceItem)
-        let useSelectionItem = NSMenuItem(title: "Use Selection for Find", action: #selector(EditorViewController.useSelectionForFind(_:)), keyEquivalent: "e")
+        let useSelectionItem = NSMenuItem(title: "Use Selection for Find", action: #selector(NativeEditorViewController.useSelectionForFind(_:)), keyEquivalent: "e")
         findMenu.addItem(useSelectionItem)
         findMenuItem.submenu = findMenu
         findMenuItem.title = "Find"
@@ -244,9 +222,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Format menu
         let formatMenuItem = NSMenuItem()
         let formatMenu = NSMenu(title: "Format")
-        formatMenu.addItem(withTitle: "Bold", action: #selector(EditorViewController.toggleBold(_:)), keyEquivalent: "b")
-        formatMenu.addItem(withTitle: "Italic", action: #selector(EditorViewController.toggleItalic(_:)), keyEquivalent: "i")
-        let codeItem = NSMenuItem(title: "Code", action: #selector(EditorViewController.toggleCode(_:)), keyEquivalent: "`")
+        formatMenu.addItem(withTitle: "Bold", action: #selector(NativeEditorViewController.toggleBold(_:)), keyEquivalent: "b")
+        formatMenu.addItem(withTitle: "Italic", action: #selector(NativeEditorViewController.toggleItalic(_:)), keyEquivalent: "i")
+        let codeItem = NSMenuItem(title: "Code", action: #selector(NativeEditorViewController.toggleCode(_:)), keyEquivalent: "`")
         formatMenu.addItem(codeItem)
         formatMenuItem.submenu = formatMenu
         mainMenu.addItem(formatMenuItem)
@@ -283,9 +261,6 @@ extension AppDelegate: NSMenuItemValidation {
             return currentDocument() != nil
         case #selector(toggleKeepRunning(_:)):
             menuItem.state = keepRunning ? .on : .off
-            return true
-        case #selector(toggleNativeEditorPrototype(_:)):
-            menuItem.state = useNativeEditorPrototype ? .on : .off
             return true
         default:
             return true

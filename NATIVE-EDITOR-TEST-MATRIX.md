@@ -63,5 +63,5 @@ Preferences are controlled via:
   - Exhaustive UI matrix:
     - `./scripts/test-native-editor.sh --ui-only --exhaustive`
 - Snapshots (optional):
-  - `KERN_ENABLE_SNAPSHOT_TESTS=1 xcodebuild -project Kern.xcodeproj -scheme Kern test`
-  - `KERN_ENABLE_SNAPSHOT_TESTS=1 KERN_RECORD_SNAPSHOTS=1 xcodebuild -project Kern.xcodeproj -scheme Kern test`
+  - `KERN_ENABLE_SNAPSHOT_TESTS=1 xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit test`
+  - `KERN_ENABLE_SNAPSHOT_TESTS=1 KERN_RECORD_SNAPSHOTS=1 xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit test`

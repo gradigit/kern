@@ -72,7 +72,7 @@ NEED_XCODEGEN=true
 if [ "$SKIP_XCODEGEN" = true ]; then
   NEED_XCODEGEN=false
 fi
-if [ -f "Kern.xcodeproj/project.pbxproj" ] && [ "Kern.xcodeproj/project.pbxproj" -nt "project.yml" ]; then
+if [ -f "KernTextKit.xcodeproj/project.pbxproj" ] && [ "KernTextKit.xcodeproj/project.pbxproj" -nt "project.yml" ]; then
   NEED_XCODEGEN=false
 fi
 
@@ -86,22 +86,22 @@ fi
 echo ""
 
 if [ "$RUN_UNIT" = true ]; then
-  echo "▸ Running unit tests (scheme: Kern)..."
+  echo "▸ Running unit tests (scheme: KernTextKit)..."
   set +e
   if [ "${#UNIT_ENV[@]}" -gt 0 ]; then
     env "${UNIT_ENV[@]}" xcodebuild \
-      -project Kern.xcodeproj \
-      -scheme Kern \
+      -project KernTextKit.xcodeproj \
+      -scheme KernTextKit \
       -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernTests.xcresult" \
+      -resultBundlePath "$OUT_DIR/KernTextKitTests.xcresult" \
       test \
       2>&1 | tee "$OUT_DIR/unit.log"
   else
     xcodebuild \
-      -project Kern.xcodeproj \
-      -scheme Kern \
+      -project KernTextKit.xcodeproj \
+      -scheme KernTextKit \
       -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernTests.xcresult" \
+      -resultBundlePath "$OUT_DIR/KernTextKitTests.xcresult" \
       test \
       2>&1 | tee "$OUT_DIR/unit.log"
   fi
@@ -116,7 +116,7 @@ if [ "$RUN_UNIT" = true ]; then
 fi
 
 if [ "$RUN_UI" = true ]; then
-  echo "▸ Running UI tests (scheme: KernUI)..."
+  echo "▸ Running UI tests (scheme: KernTextKitUI)..."
   echo "  Preflight: Ensure the Mac is unlocked and Automation permissions are granted."
 
   set +e
@@ -125,18 +125,18 @@ if [ "$RUN_UI" = true ]; then
 
   if [ "${#UI_ENV[@]}" -gt 0 ]; then
     env "${UI_ENV[@]}" KERN_UI_SCREENSHOT_DIR="$UI_SCREENSHOT_DIR" xcodebuild \
-      -project Kern.xcodeproj \
-      -scheme KernUI \
+      -project KernTextKit.xcodeproj \
+      -scheme KernTextKitUI \
       -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernUI.xcresult" \
+      -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
       test \
       2>&1 | tee "$OUT_DIR/ui.log"
   else
     env KERN_UI_SCREENSHOT_DIR="$UI_SCREENSHOT_DIR" xcodebuild \
-      -project Kern.xcodeproj \
-      -scheme KernUI \
+      -project KernTextKit.xcodeproj \
+      -scheme KernTextKitUI \
       -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernUI.xcresult" \
+      -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
       test \
       2>&1 | tee "$OUT_DIR/ui.log"
   fi
@@ -160,7 +160,7 @@ if [ "$RUN_UI" = true ]; then
     ATT_DIR="$OUT_DIR/ui-attachments"
     mkdir -p "$ATT_DIR"
     xcrun xcresulttool export attachments \
-      --path "$OUT_DIR/KernUI.xcresult" \
+      --path "$OUT_DIR/KernTextKitUI.xcresult" \
       --output-path "$ATT_DIR" \
       2>&1 | tee "$OUT_DIR/xcresult-attachments.log" >/dev/null || true
     echo "  Attachments: $ATT_DIR"

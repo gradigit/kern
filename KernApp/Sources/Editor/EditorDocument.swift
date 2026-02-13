@@ -64,16 +64,12 @@ final class EditorDocument: NSDocument {
         addWindowController(windowController)
 
         // Connect the editor VC to this document
-        if let editorVC = windowController.contentViewController as? EditorViewController {
+        if let editorVC = windowController.contentViewController as? NativeEditorViewController {
             editorVC.stringValue = stringValue
             editorVC.onContentChanged = { [weak self] markdown in
-                self?.stringValue = markdown
-                self?.updateChangeCount(.changeDone)
-            }
-        } else if let editorVC = windowController.contentViewController as? NativeEditorViewController {
-            editorVC.stringValue = stringValue
-            editorVC.onContentChanged = { [weak self] markdown in
-                self?.stringValue = markdown
+                guard let self else { return }
+                self.stringValue = markdown
+                self.updateChangeCount(.changeDone)
             }
         }
     }
@@ -115,16 +111,7 @@ final class EditorDocument: NSDocument {
                     // Push reverted content to editor with scroll preservation
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        if let hostVC = self.hostViewController,
-                           hostVC.hasFinishedLoading,
-                           hostVC.bridge != nil {
-                            let scrollPos = try? await hostVC.bridge?.getScrollPosition()
-                            try? await hostVC.bridge?.setMarkdown(self.stringValue)
-                            if let scrollPos {
-                                try? await hostVC.bridge?.setScrollPosition(scrollPos)
-                            }
-                            hostVC.showReloadToast()
-                        } else if let hostVC = self.hostNativeViewController {
+                        if let hostVC = self.hostNativeViewController {
                             hostVC.applyExternalMarkdownUpdate(self.stringValue)
                             hostVC.showReloadToast()
                         }
@@ -139,14 +126,6 @@ final class EditorDocument: NSDocument {
     }
 
     // MARK: - Helpers
-
-    /// Find the EditorViewController from our window controllers
-    @MainActor
-    var hostViewController: EditorViewController? {
-        windowControllers
-            .compactMap { $0.contentViewController as? EditorViewController }
-            .first
-    }
 
     /// Find the NativeEditorViewController from our window controllers
     @MainActor

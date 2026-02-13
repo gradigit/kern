@@ -12,11 +12,11 @@ set -uo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-KERN_APP_PATH=$(find /Users/aaaaa/Library/Developer/Xcode/DerivedData/Kern-*/Build/Products/Debug/Kern.app -maxdepth 0 2>/dev/null | head -1)
+KERN_APP_PATH=$(find /Users/aaaaa/Library/Developer/Xcode/DerivedData/KernTextKit-*/Build/Products/Debug/KernTextKit.app -maxdepth 0 2>/dev/null | head -1)
 
 if [ -z "$KERN_APP_PATH" ]; then
-    echo "ERROR: Cannot find Kern.app in DerivedData."
-    echo "       Build first: xcodebuild -project Kern.xcodeproj -scheme Kern build"
+    echo "ERROR: Cannot find KernTextKit.app in DerivedData."
+    echo "       Build first: xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit build"
     exit 1
 fi
 
@@ -33,15 +33,15 @@ elapsed_ms() {
 # ─── Kill Kern ────────────────────────────────────────────────────────────────
 
 kill_kern() {
-    pkill -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null || true
-    osascript -e 'tell application "Kern" to quit' 2>/dev/null || true
+    pkill -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
+    osascript -e 'tell application "KernTextKit" to quit' 2>/dev/null || true
     sleep 1
-    pkill -9 -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null || true
+    pkill -9 -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
     sleep 0.5
 }
 
 kern_is_alive() {
-    pgrep -f "Kern.app/Contents/MacOS/Kern" > /dev/null 2>&1
+    pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1
 }
 
 wait_for_window() {
@@ -49,13 +49,13 @@ wait_for_window() {
     local start=$(now_ms)
     while true; do
         local count
-        count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
+        count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
         if [ "$count" -gt 0 ] 2>/dev/null; then
             return 0
         fi
         local current=$(now_ms)
         if [ $(( current - start )) -ge "$max_wait_ms" ]; then
-            echo "WARNING: Timed out waiting for Kern window"
+            echo "WARNING: Timed out waiting for KernTextKit window"
             return 1
         fi
         sleep 0.05
@@ -103,7 +103,7 @@ if ! kern_is_alive; then
     rm -f "$TEMP_FILE"
     exit 1
 fi
-echo "    Kern is running (PID: $(pgrep -f 'Kern.app/Contents/MacOS/Kern' | head -1))"
+echo "    KernTextKit is running (PID: $(pgrep -f 'KernTextKit.app/Contents/MacOS/KernTextKit' | head -1))"
 
 # Step 4: Rapid modifications (5 changes with 50ms gaps)
 echo ""

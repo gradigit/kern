@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# Kern Comprehensive Benchmark Script
+# KernTextKit Comprehensive Benchmark Script
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests cold start, multi-tab open, memory, file open latency, auto-save/file
 # watcher debounce, and rapid tab switching.
@@ -22,17 +22,17 @@ RESULTS_FILE="$FIXTURES_DIR/benchmark-results.md"
 STRESS_FILE="$FIXTURES_DIR/stress-test.md"
 MEGA_STRESS_FILE="$FIXTURES_DIR/mega-stress-test.md"
 
-# Find Kern.app from DerivedData
-KERN_APP_PATH=$(find /Users/aaaaa/Library/Developer/Xcode/DerivedData/Kern-*/Build/Products/Debug/Kern.app -maxdepth 0 2>/dev/null | head -1)
+# Find KernTextKit.app from DerivedData
+KERN_APP_PATH=$(find /Users/aaaaa/Library/Developer/Xcode/DerivedData/KernTextKit-*/Build/Products/Debug/KernTextKit.app -maxdepth 0 2>/dev/null | head -1)
 
 if [ -z "$KERN_APP_PATH" ]; then
-    echo "ERROR: Cannot find Kern.app in DerivedData."
-    echo "       Build first: xcodebuild -project Kern.xcodeproj -scheme Kern build"
+    echo "ERROR: Cannot find KernTextKit.app in DerivedData."
+    echo "       Build first: xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit build"
     exit 1
 fi
 
-KERN_BINARY="$KERN_APP_PATH/Contents/MacOS/Kern"
-KERN_NAME="Kern"
+KERN_BINARY="$KERN_APP_PATH/Contents/MacOS/KernTextKit"
+KERN_NAME="KernTextKit"
 
 RUNS=3
 SMALL_FILE=""
@@ -78,10 +78,10 @@ ms_to_s() {
 # ─── Kill Kern ────────────────────────────────────────────────────────────────
 
 kill_kern() {
-    pkill -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null || true
-    osascript -e 'tell application "Kern" to quit' 2>/dev/null || true
+    pkill -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
+    osascript -e 'tell application "KernTextKit" to quit' 2>/dev/null || true
     sleep 1
-    pkill -9 -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null || true
+    pkill -9 -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
     sleep 0.5
 }
 
@@ -91,7 +91,7 @@ wait_for_process() {
     local max_wait_ms="${1:-10000}"
     local start=$(now_ms)
     while true; do
-        if pgrep -f "Kern.app/Contents/MacOS/Kern" > /dev/null 2>&1; then
+        if pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1; then
             local end=$(now_ms)
             echo $(elapsed_ms "$start" "$end")
             return 0
@@ -112,7 +112,7 @@ wait_for_window() {
     local start=$(now_ms)
     while true; do
         local count
-        count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
+        count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
         if [ "$count" -gt 0 ] 2>/dev/null; then
             local end=$(now_ms)
             echo $(elapsed_ms "$start" "$end")
@@ -130,7 +130,7 @@ wait_for_window() {
 # ─── Get Kern PID ────────────────────────────────────────────────────────────
 
 get_kern_pid() {
-    pgrep -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null | head -1
+    pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null | head -1
 }
 
 # ─── Get memory in MB ────────────────────────────────────────────────────────
@@ -153,7 +153,7 @@ get_memory_mb() {
 # ─── Check if Kern is still alive ────────────────────────────────────────────
 
 kern_is_alive() {
-    pgrep -f "Kern.app/Contents/MacOS/Kern" > /dev/null 2>&1
+    pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1
 }
 
 # ─── Generate Test Fixtures ──────────────────────────────────────────────────
@@ -404,7 +404,7 @@ benchmark_multi_tab() {
 
         # Count windows
         local window_count
-        window_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "?")
+        window_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "?")
 
         local pid=$(get_kern_pid)
         local mem=$(get_memory_mb "$pid")
@@ -514,7 +514,7 @@ benchmark_file_open_latency() {
         for i in $(seq 1 "$RUNS"); do
             # Get current window count
             local before_count
-            before_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
+            before_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
 
             local start=$(now_ms)
             open -a "$KERN_APP_PATH" "$file"
@@ -524,7 +524,7 @@ benchmark_file_open_latency() {
             local waited=0
             while [ "$waited" -lt "$max_wait" ]; do
                 local current_count
-                current_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
+                current_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
                 if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
                     break
                 fi
@@ -541,7 +541,7 @@ benchmark_file_open_latency() {
             sleep 0.5
             osascript -e '
                 tell application "System Events"
-                    tell process "Kern"
+                    tell process "KernTextKit"
                         keystroke "w" using {command down}
                     end tell
                 end tell
@@ -669,7 +669,7 @@ benchmark_rapid_tab_switch() {
     # Use Cmd+Shift+] for forward tab navigation (standard macOS)
     osascript << 'APPLESCRIPT_EOF' 2>/dev/null || true
 tell application "System Events"
-    tell process "Kern"
+    tell process "KernTextKit"
         repeat 50 times
             -- Cmd+Shift+] to switch to next tab
             key code 30 using {command down, shift down}
@@ -741,7 +741,7 @@ generate_results() {
 
 ## 1. Cold Start Benchmark
 
-Time from \`open -a Kern\` until the first window appears. Average of $RUNS runs.
+Time from \`open -a KernTextKit\` until the first window appears. Average of $RUNS runs.
 
 | Scenario | Avg Time | Notes |
 |----------|----------|-------|
@@ -751,7 +751,7 @@ Time from \`open -a Kern\` until the first window appears. Average of $RUNS runs
 
 ## 2. Multi-Tab Open Benchmark
 
-Fresh Kern launch, then opening N files sequentially with \`open -a Kern <file>\`.
+Fresh KernTextKit launch, then opening N files sequentially with \`open -a KernTextKit <file>\`.
 
 | Tabs Opened | Total Time | Memory | Windows Reported |
 |-------------|------------|--------|------------------|

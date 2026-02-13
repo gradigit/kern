@@ -25,14 +25,15 @@ xcuserdata/
 *.ipa
 
 # XcodeGen output (regenerated from project.yml)
+KernTextKit.xcodeproj/
 Kern.xcodeproj/
 
 # Swift Package Manager
 .build/
 Packages/
 
-# Node.js (CoreEditor)
-CoreEditor/node_modules/
+# Legacy web editor (removed from Kern-textkit repo)
+CoreEditor/
 
 # Playwright MCP artifacts and test outputs
 .playwright-mcp/

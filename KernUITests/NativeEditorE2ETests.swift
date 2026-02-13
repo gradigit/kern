@@ -572,7 +572,6 @@ final class NativeEditorE2ETests: XCTestCase {
 
     private func makeApp(opening url: URL, env: [String: String] = [:]) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchEnvironment["KERN_USE_NATIVE_EDITOR"] = "1"
         app.launchEnvironment["KERN_UI_TESTING"] = "1"
         app.launchEnvironment["KERN_TEST_WINDOW_SIZE"] = "900x650"
         app.launchEnvironment["KERN_TEST_APPEARANCE"] = "light"

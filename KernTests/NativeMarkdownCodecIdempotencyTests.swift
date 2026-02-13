@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Kern
+@testable import KernTextKit
 
 /// Property-style tests: for a given option set, exported Markdown should be stable under
 /// repeated import/export (idempotent). This catches subtle state loss bugs without requiring
@@ -177,4 +177,3 @@ final class NativeMarkdownCodecIdempotencyTests: XCTestCase {
         return "No line diff found (content differs but lines are identical?)"
     }
 }
-

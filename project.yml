@@ -1,6 +1,6 @@
-name: Kern
+name: KernTextKit
 options:
-  bundleIdPrefix: com.kern
+  bundleIdPrefix: com.kern.textkit
   deploymentTarget:
     macOS: "14.0"
   xcodeVersion: "16.0"
@@ -16,30 +16,27 @@ packages:
     from: 1.18.9
 
 schemes:
-  Kern:
+  KernTextKit:
     build:
       targets:
-        Kern: all
+        KernTextKit: all
     test:
       targets:
-        - KernTests
-  KernUI:
+        - KernTextKitTests
+  KernTextKitUI:
     build:
       targets:
-        Kern: all
+        KernTextKit: all
     test:
       targets:
-        - KernUITests
+        - KernTextKitUITests
 
 targets:
-  Kern:
+  KernTextKit:
     type: application
     platform: macOS
     sources:
       - path: KernApp/Sources
-      - path: CoreEditor/dist
-        type: folder
-        buildPhase: resources
       - path: KernApp/Resources/Assets.xcassets
         buildPhase: resources
     settings:
@@ -49,17 +46,17 @@ targets:
         INFOPLIST_FILE: KernApp/Info.plist
         CODE_SIGN_ENTITLEMENTS: KernApp/Kern.entitlements
         CODE_SIGN_IDENTITY: "-"
-        PRODUCT_BUNDLE_IDENTIFIER: com.kern.app
-        PRODUCT_NAME: Kern
+        PRODUCT_BUNDLE_IDENTIFIER: com.kern.textkit
+        PRODUCT_NAME: KernTextKit
         GENERATE_INFOPLIST_FILE: false
 
-  KernTests:
+  KernTextKitTests:
     type: bundle.unit-test
     platform: macOS
     sources:
       - path: KernTests
     dependencies:
-      - target: Kern
+      - target: KernTextKit
       - package: SnapshotTesting
     settings:
       base:
@@ -68,13 +65,13 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         CODE_SIGN_IDENTITY: "-"
 
-  KernUITests:
+  KernTextKitUITests:
     type: bundle.ui-testing
     platform: macOS
     sources:
       - path: KernUITests
     dependencies:
-      - target: Kern
+      - target: KernTextKit
     settings:
       base:
         MACOSX_DEPLOYMENT_TARGET: "14.0"

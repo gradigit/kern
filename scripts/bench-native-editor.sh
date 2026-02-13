@@ -23,7 +23,7 @@ echo "DerivedData: $DERIVED_DATA_PATH"
 echo ""
 
 NEED_XCODEGEN=true
-if [ -f "Kern.xcodeproj/project.pbxproj" ] && [ "Kern.xcodeproj/project.pbxproj" -nt "project.yml" ]; then
+if [ -f "KernTextKit.xcodeproj/project.pbxproj" ] && [ "KernTextKit.xcodeproj/project.pbxproj" -nt "project.yml" ]; then
   NEED_XCODEGEN=false
 fi
 
@@ -35,17 +35,17 @@ else
 fi
 
 echo ""
-echo "▸ Running performance tests (scheme: Kern)..."
+echo "▸ Running performance tests (scheme: KernTextKit)..."
 
 set +e
 KERN_ENABLE_PERF_TESTS=1 xcodebuild \
-  -project Kern.xcodeproj \
-  -scheme Kern \
+  -project KernTextKit.xcodeproj \
+  -scheme KernTextKit \
   -derivedDataPath "$DERIVED_DATA_PATH" \
-  -resultBundlePath "$OUT_DIR/KernPerf.xcresult" \
+  -resultBundlePath "$OUT_DIR/KernTextKitPerf.xcresult" \
   test \
-  -only-testing:KernTests/NativeMarkdownCodecPerformanceTests/testImportExportBenchmarkFilePerformance \
-  -only-testing:KernTests/NativeEditorRenderPerformanceTests/testRenderBenchmarkFilePerformance \
+  -only-testing:KernTextKitTests/NativeMarkdownCodecPerformanceTests/testImportExportBenchmarkFilePerformance \
+  -only-testing:KernTextKitTests/NativeEditorRenderPerformanceTests/testRenderBenchmarkFilePerformance \
   2>&1 | tee "$OUT_DIR/perf.log"
 STATUS=${PIPESTATUS[0]}
 set -e
@@ -57,5 +57,4 @@ fi
 
 echo ""
 echo "✓ Benchmarks completed"
-echo "Result bundle: $OUT_DIR/KernPerf.xcresult"
-
+echo "Result bundle: $OUT_DIR/KernTextKitPerf.xcresult"
