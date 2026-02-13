@@ -110,6 +110,28 @@ final class NativeEditorE2ETests: XCTestCase {
         XCTAssertTrue(saved.contains("- [ ] item"))
     }
 
+    func testTaskRenderingGfmDoesNotShowBulletDotByDefault() throws {
+        let tmp = try makeTempMarkdownFile(name: "kern-ui-task-rendering-gfm")
+        try "- [ ] item\n".write(to: tmp, atomically: true, encoding: .utf8)
+
+        let app = makeApp(opening: tmp, env: [
+            "KERN_NATIVE_TASK_RENDERING": "gfm",
+        ])
+        app.launch()
+
+        let textView = app.textViews["NativeEditor.TextView"]
+        XCTAssertTrue(textView.waitForExistence(timeout: 10))
+
+        let value = (textView.value as? String) ?? ""
+        XCTAssertTrue(value.contains("☐ item"))
+        XCTAssertFalse(value.contains("•"), "GFM-style task rendering should not show a bullet dot")
+        attachScreenshot(name: "task-rendering-gfm", element: textView)
+
+        try save(app: app)
+        let saved = try waitForFileContains(tmp, substring: "- [ ] item", timeout: 5)
+        XCTAssertTrue(saved.contains("- [ ] item"))
+    }
+
     func testHeadingExitsToParagraphOnEnter() throws {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-heading")
 
