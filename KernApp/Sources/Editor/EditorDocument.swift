@@ -63,6 +63,19 @@ final class EditorDocument: NSDocument {
         let windowController = EditorWindowController()
         addWindowController(windowController)
 
+        // Establish a baseline mod date so our file presenter doesn't treat the initial open
+        // (or our own autosaves) as "external" writes and trigger a revert loop.
+        if let fileURL {
+            do {
+                let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                if let modDate = attrs[.modificationDate] as? Date {
+                    lastKnownFileModDate = modDate
+                }
+            } catch {
+                // Ignore; file watching will still work but may be noisier.
+            }
+        }
+
         // Connect the editor VC to this document
         if let editorVC = windowController.contentViewController as? NativeEditorViewController {
             editorVC.stringValue = stringValue
@@ -78,7 +91,18 @@ final class EditorDocument: NSDocument {
 
     override func writeSafely(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType) throws {
         try super.writeSafely(to: url, ofType: typeName, for: saveOperation)
-        lastKnownFileModDate = Date()
+        // Use the actual on-disk mod date to prevent false-positive reloads from filesystem timestamp
+        // rounding/resolution differences.
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+            if let modDate = attrs[.modificationDate] as? Date {
+                lastKnownFileModDate = modDate
+            } else {
+                lastKnownFileModDate = Date()
+            }
+        } catch {
+            lastKnownFileModDate = Date()
+        }
     }
 
     // MARK: - File Watching
@@ -100,10 +124,15 @@ final class EditorDocument: NSDocument {
                 do {
                     let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
                     let modDate = attrs[.modificationDate] as? Date
-                    guard let modDate,
-                          modDate > (self.lastKnownFileModDate ?? .distantPast) else {
+                    guard let modDate else { return }
+
+                    // If we don't have a baseline yet, establish it and ignore this change.
+                    if self.lastKnownFileModDate == nil {
+                        self.lastKnownFileModDate = modDate
                         return
                     }
+
+                    guard modDate > (self.lastKnownFileModDate ?? .distantPast) else { return }
                     self.lastKnownFileModDate = modDate
 
                     try self.revert(toContentsOf: fileURL, ofType: fileType)

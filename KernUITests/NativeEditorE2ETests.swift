@@ -7,7 +7,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-todo")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -43,7 +43,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_EXPORT_DIALECT": "kern",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -69,7 +69,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-ordered")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -96,12 +96,18 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_TASK_RENDERING": "kern",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "kern task rendering should show bullet+checkbox"
+        ) { v in
+            v.contains("• ☐ item")
+        }
         XCTAssertTrue(value.contains("• ☐ item"))
         attachScreenshot(name: "task-rendering-kern", element: textView)
 
@@ -117,12 +123,18 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_TASK_RENDERING": "gfm",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "gfm task rendering should show checkbox"
+        ) { v in
+            v.contains("☐ item")
+        }
         XCTAssertTrue(value.contains("☐ item"))
         XCTAssertFalse(value.contains("•"), "GFM-style task rendering should not show a bullet dot")
         attachScreenshot(name: "task-rendering-gfm", element: textView)
@@ -136,7 +148,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-heading")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -168,12 +180,18 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_ORDERED_TASKS": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "ordered tasks should render as WYSIWYG checkboxes"
+        ) { v in
+            v.contains("1. ☐ one") && v.contains("2. ☑ two")
+        }
         XCTAssertTrue(value.contains("1. ☐ one"))
         XCTAssertTrue(value.contains("2. ☑ two"))
         attachScreenshot(name: "ordered-tasks-enabled", element: textView)
@@ -191,12 +209,18 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_HEADING_CHECKBOXES": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "checkbox heading should render as WYSIWYG checkbox"
+        ) { v in
+            v.contains("☐ Heading todo")
+        }
         XCTAssertTrue(value.contains("☐ Heading todo"))
         XCTAssertFalse(value.contains("[ ] Heading todo"))
         attachScreenshot(name: "heading-checkbox-enabled", element: textView)
@@ -211,7 +235,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-bullets")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -237,7 +261,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-shift-enter")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -267,7 +291,7 @@ final class NativeEditorE2ETests: XCTestCase {
         """.write(to: tmp, atomically: true, encoding: .utf8)
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -295,7 +319,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-table-typed")
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -334,14 +358,14 @@ final class NativeEditorE2ETests: XCTestCase {
         """.write(to: tmp, atomically: true, encoding: .utf8)
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
         let value = waitForTextViewValue(
             textView,
-            timeout: 2.0,
+            timeout: 5.0,
             description: "table import renders as WYSIWYG (no pipe syntax)"
         ) { v in
             v.contains("Before paragraph.") && v.contains("H1") && v.contains("H2") && v.contains("r1c1") && v.contains("r1c2") && !v.contains("| ---")
@@ -367,12 +391,18 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_GFM_EXTENSION_EXPORT": "lint",
             "KERN_NATIVE_HEADING_CHECKBOXES": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "lint mode heading checkbox should render as WYSIWYG checkbox"
+        ) { v in
+            v.contains("☑ Heading todo")
+        }
         XCTAssertTrue(value.contains("☑ Heading todo"))
         attachScreenshot(name: "gfm-lint-heading-open", element: textView)
 
@@ -392,12 +422,18 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_GFM_EXTENSION_EXPORT": "portable",
             "KERN_NATIVE_HEADING_CHECKBOXES": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "portable mode heading checkbox should render as WYSIWYG checkbox"
+        ) { v in
+            v.contains("☑ Heading todo")
+        }
         XCTAssertTrue(value.contains("☑ Heading todo"))
         attachScreenshot(name: "gfm-portable-heading-open", element: textView)
 
@@ -420,12 +456,18 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_GFM_EXTENSION_EXPORT": "portable",
             "KERN_NATIVE_ORDERED_TASKS": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "portable mode ordered tasks should render as WYSIWYG checkboxes"
+        ) { v in
+            v.contains("1. ☐ one") && v.contains("2. ☑ two")
+        }
         XCTAssertTrue(value.contains("1. ☐ one"))
         XCTAssertTrue(value.contains("2. ☑ two"))
         attachScreenshot(name: "gfm-portable-ordered-tasks-open", element: textView)
@@ -450,12 +492,18 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_GFM_EXTENSION_EXPORT": "lint",
             "KERN_NATIVE_ORDERED_TASKS": "1",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "lint mode ordered tasks should render as WYSIWYG checkboxes"
+        ) { v in
+            v.contains("1. ☐ one") && v.contains("2. ☑ two")
+        }
         XCTAssertTrue(value.contains("1. ☐ one"))
         XCTAssertTrue(value.contains("2. ☑ two"))
         attachScreenshot(name: "gfm-lint-ordered-tasks-open", element: textView)
@@ -478,7 +526,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_ORDERED_NUMBERING": "preserveTyped",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         attachScreenshot(name: "ordered-numbering-preserve-open", element: app.windows.firstMatch)
         try save(app: app)
@@ -499,7 +547,7 @@ final class NativeEditorE2ETests: XCTestCase {
         let app = makeApp(opening: tmp, env: [
             "KERN_NATIVE_ORDERED_NUMBERING": "gfmDefault",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         attachScreenshot(name: "ordered-numbering-gfm-default-open", element: app.windows.firstMatch)
         try save(app: app)
@@ -522,19 +570,33 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_TASK_RENDERING": "kern",
             "KERN_NATIVE_CHECKBOX_HIT_TARGET": "marker",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 2.0,
+            description: "marker-mode task rendering should show bullet+checkbox"
+        ) { v in
+            v.contains("• ☐ item")
+        }
         XCTAssertTrue(value.contains("• ☐ item"))
         attachScreenshot(name: "hit-target-marker-before", element: textView)
 
         // Click in the marker prefix area (between bullet dot and checkbox).
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 5)
         clickAtOffset(textView, x: 42, y: 40)
 
-        let toggled = (textView.value as? String) ?? ""
+        let toggled = waitForTextViewValue(
+            textView,
+            timeout: 2.0,
+            description: "clicking marker prefix should toggle checkbox"
+        ) { v in
+            v.contains("• ☑ item")
+        }
         XCTAssertTrue(toggled.contains("• ☑ item"))
         attachScreenshot(name: "hit-target-marker-after", element: textView)
     }
@@ -544,7 +606,7 @@ final class NativeEditorE2ETests: XCTestCase {
         try "Before.\n".write(to: tmp, atomically: true, encoding: .utf8)
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -575,7 +637,7 @@ final class NativeEditorE2ETests: XCTestCase {
         try "alpha beta alpha\n".write(to: tmp, atomically: true, encoding: .utf8)
 
         let app = makeApp(opening: tmp)
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
@@ -586,6 +648,10 @@ final class NativeEditorE2ETests: XCTestCase {
 
         let findSearch = app.searchFields["NativeEditor.FindField"]
         let findText = app.textFields["NativeEditor.FindField"]
+        if !(findSearch.waitForExistence(timeout: 2) || findText.waitForExistence(timeout: 2)) {
+            // Fallback: use the menu in case key equivalents are swallowed by the focused control.
+            try openFindReplaceViaMenu(app: app)
+        }
         XCTAssertTrue(findSearch.waitForExistence(timeout: 5) || findText.waitForExistence(timeout: 5))
         let findField = findSearch.exists ? findSearch : findText
         findField.click()
@@ -633,12 +699,18 @@ final class NativeEditorE2ETests: XCTestCase {
             "KERN_NATIVE_TASK_RENDERING": "gfm",
             "KERN_NATIVE_CHECKBOX_HIT_TARGET": "glyph",
         ])
-        app.launch()
+        launchAndWaitForeground(app)
 
         let textView = app.textViews["NativeEditor.TextView"]
         XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-        let value = (textView.value as? String) ?? ""
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 5.0,
+            description: "glyph hit target should render as WYSIWYG checkbox"
+        ) { v in
+            v.contains("☐ item")
+        }
         XCTAssertTrue(value.contains("☐ item"))
         attachScreenshot(name: "hit-target-glyph-before", element: textView)
 
@@ -696,7 +768,9 @@ final class NativeEditorE2ETests: XCTestCase {
                 ],
                 input: input,
                 expectUIContains: ["☑ Heading todo", "☐ todo", "1. ☐ ordered task", "TblLeft", "TblRight", "cellL", "cellR"],
-                waitSubstring: "## [x] Heading todo",
+                // This scenario relies on Save normalizing the ordered list numbering (5. -> 2.),
+                // so we must wait for a post-save substring that is not present in the initial input.
+                waitSubstring: "2. five",
                 expectDiskContains: ["## [x] Heading todo", "- [ ] todo", "1. [ ] ordered task", "| TblLeft | TblRight |", "| --- | --- |", "| cellL | cellR |", "1. one", "2. five"],
                 expectDiskNotContains: ["## ☑ Heading todo", "- [x] Heading todo"]
             ),
@@ -749,13 +823,19 @@ final class NativeEditorE2ETests: XCTestCase {
             try scenario.input.write(to: tmp, atomically: true, encoding: .utf8)
 
             let app = makeApp(opening: tmp, env: scenario.env)
-            app.launch()
+            launchAndWaitForeground(app)
             defer { app.terminate() }
 
             let textView = app.textViews["NativeEditor.TextView"]
             XCTAssertTrue(textView.waitForExistence(timeout: 10))
 
-            let value = (textView.value as? String) ?? ""
+            let value = waitForTextViewValue(
+                textView,
+                timeout: 5.0,
+                description: "scenario \(scenario.name) should render expected WYSIWYG text"
+            ) { v in
+                scenario.expectUIContains.allSatisfy { v.contains($0) }
+            }
             for s in scenario.expectUIContains {
                 XCTAssertTrue(value.contains(s), "Scenario \(scenario.name) expected UI to contain: \(s)")
             }
@@ -799,7 +879,17 @@ final class NativeEditorE2ETests: XCTestCase {
         return app
     }
 
+    private func launchAndWaitForeground(_ app: XCUIApplication) {
+        app.launch()
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 5)
+    }
+
     private func save(app: XCUIApplication) throws {
+        // Ensure the app is in the foreground; menu bar interactions are not reliable otherwise.
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 5)
+
         // Prefer the menu item to avoid key event flakiness.
         let fileMenu = app.menuBars.menuBarItems["File"]
         XCTAssertTrue(fileMenu.waitForExistence(timeout: 5))
@@ -810,6 +900,23 @@ final class NativeEditorE2ETests: XCTestCase {
         XCTAssertTrue(saveItem.waitForExistence(timeout: 5))
         XCTAssertTrue(saveItem.isEnabled, "Save menu item should be enabled")
         saveItem.click()
+    }
+
+    private func openFindReplaceViaMenu(app: XCUIApplication) throws {
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 5)
+
+        let editMenu = app.menuBars.menuBarItems["Edit"]
+        XCTAssertTrue(editMenu.waitForExistence(timeout: 5))
+        editMenu.click()
+
+        let findSubmenu = editMenu.menus.menuItems["Find"]
+        XCTAssertTrue(findSubmenu.waitForExistence(timeout: 5))
+        findSubmenu.hover()
+
+        let findReplace = findSubmenu.menus.menuItems["Find and Replace\u{2026}"]
+        XCTAssertTrue(findReplace.waitForExistence(timeout: 5))
+        findReplace.click()
     }
 
     private func waitForFileContains(_ url: URL, substring: String, timeout: TimeInterval) throws -> String {

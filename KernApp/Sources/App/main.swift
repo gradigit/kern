@@ -14,26 +14,59 @@ func msSinceStart() -> String {
 NSLog("[Perf] Process start at 0.0ms")
 
 // Native editor preferences (UI tests / automation).
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_EXPORT_DIALECT"] {
-    UserDefaults.standard.set(v, forKey: "nativeEditor.exportDialect") // gfm | kern
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_GFM_EXTENSION_EXPORT"] {
-    UserDefaults.standard.set(v, forKey: "nativeEditor.gfmExtensionExportStrategy") // preserve | portable | lint
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_TASK_RENDERING"] {
-    UserDefaults.standard.set(v, forKey: "nativeEditor.taskRendering") // gfm | kern
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_ORDERED_TASKS"] {
-    UserDefaults.standard.set(v == "1", forKey: "nativeEditor.orderedTasksEnabled")
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_HEADING_CHECKBOXES"] {
-    UserDefaults.standard.set(v == "1", forKey: "nativeEditor.headingCheckboxesEnabled")
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_ORDERED_NUMBERING"] {
-    UserDefaults.standard.set(v, forKey: "nativeEditor.orderedListNumbering") // gfmDefault | preserveTyped
-}
-if let v = ProcessInfo.processInfo.environment["KERN_NATIVE_CHECKBOX_HIT_TARGET"] {
-    UserDefaults.standard.set(v, forKey: "nativeEditor.checkboxHitTarget") // glyph | marker
+//
+// Important: UI tests must be deterministic and must not mutate a developer's persisted defaults.
+// We achieve this by applying overrides in a *volatile* UserDefaults domain when `KERN_UI_TESTING=1`.
+let env = ProcessInfo.processInfo.environment
+let isUITesting = env["KERN_UI_TESTING"] == "1"
+
+if isUITesting {
+    // Baseline defaults for tests (GFM-first, with optional Kern extensions toggled per-test via env).
+    var overrides: [String: Any] = [
+        "nativeEditor.exportDialect": "gfm",
+        "nativeEditor.gfmExtensionExportStrategy": "preserve",
+        "nativeEditor.taskRendering": "gfm",
+        "nativeEditor.orderedTasksEnabled": false,
+        "nativeEditor.headingCheckboxesEnabled": false,
+        "nativeEditor.orderedListNumbering": "gfmDefault",
+        "nativeEditor.checkboxHitTarget": "glyph",
+    ]
+
+    // Apply per-run/per-test overrides from env.
+    if let v = env["KERN_NATIVE_EXPORT_DIALECT"] { overrides["nativeEditor.exportDialect"] = v } // gfm | kern
+    if let v = env["KERN_NATIVE_GFM_EXTENSION_EXPORT"] { overrides["nativeEditor.gfmExtensionExportStrategy"] = v } // preserve | portable | lint
+    if let v = env["KERN_NATIVE_TASK_RENDERING"] { overrides["nativeEditor.taskRendering"] = v } // gfm | kern
+    if let v = env["KERN_NATIVE_ORDERED_TASKS"] { overrides["nativeEditor.orderedTasksEnabled"] = (v == "1") }
+    if let v = env["KERN_NATIVE_HEADING_CHECKBOXES"] { overrides["nativeEditor.headingCheckboxesEnabled"] = (v == "1") }
+    if let v = env["KERN_NATIVE_ORDERED_NUMBERING"] { overrides["nativeEditor.orderedListNumbering"] = v } // gfmDefault | preserveTyped
+    if let v = env["KERN_NATIVE_CHECKBOX_HIT_TARGET"] { overrides["nativeEditor.checkboxHitTarget"] = v } // glyph | marker
+
+    // Use NSArgumentDomain (highest-precedence, in-memory) so overrides win over any persisted defaults
+    // without mutating the developer's preferences on disk.
+    UserDefaults.standard.setVolatileDomain(overrides, forName: "NSArgumentDomain")
+} else {
+    // Normal runs: allow env vars to override persisted defaults (useful for manual profiling/debugging).
+    if let v = env["KERN_NATIVE_EXPORT_DIALECT"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.exportDialect") // gfm | kern
+    }
+    if let v = env["KERN_NATIVE_GFM_EXTENSION_EXPORT"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.gfmExtensionExportStrategy") // preserve | portable | lint
+    }
+    if let v = env["KERN_NATIVE_TASK_RENDERING"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.taskRendering") // gfm | kern
+    }
+    if let v = env["KERN_NATIVE_ORDERED_TASKS"] {
+        UserDefaults.standard.set(v == "1", forKey: "nativeEditor.orderedTasksEnabled")
+    }
+    if let v = env["KERN_NATIVE_HEADING_CHECKBOXES"] {
+        UserDefaults.standard.set(v == "1", forKey: "nativeEditor.headingCheckboxesEnabled")
+    }
+    if let v = env["KERN_NATIVE_ORDERED_NUMBERING"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.orderedListNumbering") // gfmDefault | preserveTyped
+    }
+    if let v = env["KERN_NATIVE_CHECKBOX_HIT_TARGET"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.checkboxHitTarget") // glyph | marker
+    }
 }
 
 // Swizzle AX bundle loading to background thread (saves 10-30ms on main thread)

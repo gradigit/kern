@@ -386,6 +386,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         isApplyingInputRules = true
         defer { isApplyingInputRules = false }
 
+        // If we're converting a heading marker, keep heading typing attrs so subsequent characters
+        // (and export) retain the heading block kind even when conversion happens on an empty marker-only line.
+        let headingLevel = typedHeadingLevel(line)
+
         // Reuse our importer to hide typed syntax and apply attributes deterministically.
         let opt = NativeMarkdownCodec.Options.fromUserDefaults()
         let imported = NativeMarkdownCodec.importMarkdown(line, options: opt)
@@ -395,6 +399,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         // Keep the caret reasonably close (best-effort).
         let newCaret = min(max(0, caret + delta), storage.length)
         textView.setSelectedRange(NSRange(location: newCaret, length: 0))
+
+        if let headingLevel {
+            setHeadingTypingAttributes(level: headingLevel)
+        }
     }
 
     private func shouldConvertTypedMarkdown(_ line: String) -> Bool {
@@ -432,6 +440,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if line == "- " { return true }
 
         return false
+    }
+
+    private func typedHeadingLevel(_ line: String) -> Int? {
+        var level = 0
+        for ch in line {
+            if ch == "#" { level += 1 } else { break }
+        }
+        guard level >= 1, level <= 6 else { return nil }
+        let i = line.index(line.startIndex, offsetBy: level)
+        guard i < line.endIndex, line[i] == " " else { return nil }
+        return level
     }
 
     private func isOrderedListPrefix(_ line: String) -> Bool {
@@ -721,6 +740,31 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         textView.typingAttributes = [
             .font: baseFont,
             .foregroundColor: NSColor.labelColor,
+        ]
+    }
+
+    private func setHeadingTypingAttributes(level: Int) {
+        let lvl = max(1, min(6, level))
+        let size: CGFloat
+        switch lvl {
+        case 1: size = 28
+        case 2: size = 22
+        case 3: size = 18
+        default: size = 16
+        }
+
+        let font = NSFont.systemFont(ofSize: size, weight: .bold)
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = lvl == 1 ? 14 : 10
+        style.paragraphSpacing = 6
+
+        // Include semantic attrs so export sees this paragraph as a heading.
+        textView.typingAttributes = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: style,
+            .kernBlockKind: KernBlockKind.heading.rawValue,
+            .kernHeadingLevel: lvl,
         ]
     }
 

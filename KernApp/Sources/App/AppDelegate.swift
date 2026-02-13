@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         buildMenuBar()
 
+        // When using a custom `main.swift` (not NSApplicationMain), macOS will not always
+        // open document arguments automatically. UI tests (and CLI launches) pass file paths
+        // as arguments, so explicitly open them here for deterministic behavior.
+        openCommandLineDocumentsIfNeeded()
+
         NSLog("[Perf] applicationDidFinishLaunching end at %@ms", msSinceStart())
 
         // Defer untitled document creation to the next run loop iteration.
@@ -29,16 +34,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func openCommandLineDocumentsIfNeeded() {
+        // If a document open already started (Apple Events), don't duplicate it.
+        if let kernDC = NSDocumentController.shared as? KernDocumentController, kernDC.hasOpenedDocument {
+            return
+        }
+
+        let urls = commandLineFileURLsToOpen()
+        guard !urls.isEmpty else { return }
+
+        for url in urls {
+            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
+                if let error {
+                    NSLog("[AppDelegate] Failed to open CLI document %@: %@", url.path, error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func commandLineFileURLsToOpen() -> [URL] {
+        var urls: [URL] = []
+        for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
+            guard FileManager.default.fileExists(atPath: arg) else { continue }
+            urls.append(URL(fileURLWithPath: arg))
+        }
+        return urls
+    }
+
     private func openUntitledIfNeeded() {
         let dc = NSDocumentController.shared
         // Skip if files are already being opened via Apple Events or other means
         if let kernDC = dc as? KernDocumentController, kernDC.hasOpenedDocument { return }
+        // When launched with a file argument (common in UI tests), the document open can race
+        // with our async untitled creation. Avoid creating a stray untitled doc in that case.
+        if hasFileArgumentToOpen() { return }
         guard dc.documents.isEmpty else { return }
         do {
             try dc.openUntitledDocumentAndDisplay(true)
         } catch {
             NSLog("[AppDelegate] Failed to open untitled document: %@", error.localizedDescription)
         }
+    }
+
+    private func hasFileArgumentToOpen() -> Bool {
+        for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
+            if FileManager.default.fileExists(atPath: arg) { return true }
+        }
+        return false
     }
 
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
@@ -53,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func saveDocument(_ sender: Any?) {
         flushNativeEditorExportIfNeeded()
+        // Use NSDocument's save action so any document/controller hooks run consistently.
         currentDocument()?.save(sender)
     }
 
@@ -62,17 +105,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func currentDocument() -> NSDocument? {
-        let window = NSApp.keyWindow ?? NSApp.mainWindow
-        if let doc = window?.windowController?.document as? NSDocument {
-            return doc
+        // Prefer ordered windows (front-most first); menu actions can temporarily clear keyWindow.
+        for window in NSApp.orderedWindows {
+            if let doc = window.windowController?.document as? NSDocument {
+                return doc
+            }
         }
-        return NSDocumentController.shared.currentDocument
+        if let doc = NSDocumentController.shared.currentDocument { return doc }
+        return NSDocumentController.shared.documents.first
     }
 
     private func flushNativeEditorExportIfNeeded() {
+        // Flush the exact document we're about to save (robust vs transient window focus changes).
+        if let doc = currentDocument() as? EditorDocument,
+           let hostVC = doc.hostNativeViewController {
+            hostVC.flushPendingExport()
+            return
+        }
+
+        // Fallback: best-effort based on current main/key window.
         let window = NSApp.keyWindow ?? NSApp.mainWindow
         guard let nativeVC = window?.contentViewController as? NativeEditorViewController else { return }
         nativeVC.flushPendingExport()
+    }
+
+    // MARK: - Find / Replace (Forward to Current Editor)
+
+    private func currentNativeEditorViewController() -> NativeEditorViewController? {
+        if let doc = currentDocument() as? EditorDocument,
+           let hostVC = doc.hostNativeViewController {
+            return hostVC
+        }
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        return window?.contentViewController as? NativeEditorViewController
+    }
+
+    @objc func showFind(_ sender: Any?) {
+        currentNativeEditorViewController()?.showFind(sender)
+    }
+
+    @objc func showFindReplace(_ sender: Any?) {
+        currentNativeEditorViewController()?.showFindReplace(sender)
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        currentNativeEditorViewController()?.findNext(sender)
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        currentNativeEditorViewController()?.findPrevious(sender)
+    }
+
+    @objc func useSelectionForFind(_ sender: Any?) {
+        currentNativeEditorViewController()?.useSelectionForFind(sender)
     }
 
     // MARK: - New Window / New Tab
@@ -184,8 +269,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "t")
         fileMenu.addItem(withTitle: "Open…", action: #selector(NSDocumentController.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "Save", action: #selector(saveDocument(_:)), keyEquivalent: "s")
-        fileMenu.addItem(withTitle: "Save As…", action: #selector(saveDocumentAs(_:)), keyEquivalent: "S")
+        let saveItem = fileMenu.addItem(withTitle: "Save", action: #selector(saveDocument(_:)), keyEquivalent: "s")
+        saveItem.target = self
+        let saveAsItem = fileMenu.addItem(withTitle: "Save As…", action: #selector(saveDocumentAs(_:)), keyEquivalent: "S")
+        saveAsItem.target = self
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenuItem.submenu = fileMenu
@@ -206,17 +293,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Find submenu
         let findMenuItem = NSMenuItem()
         let findMenu = NSMenu(title: "Find")
-        findMenu.addItem(withTitle: "Find\u{2026}", action: #selector(NativeEditorViewController.showFind(_:)), keyEquivalent: "f")
-        let findReplaceItem = NSMenuItem(title: "Find and Replace\u{2026}", action: #selector(NativeEditorViewController.showFindReplace(_:)), keyEquivalent: "h")
+        let findItem = findMenu.addItem(withTitle: "Find\u{2026}", action: #selector(showFind(_:)), keyEquivalent: "f")
+        findItem.target = self
+        let findReplaceItem = NSMenuItem(title: "Find and Replace\u{2026}", action: #selector(showFindReplace(_:)), keyEquivalent: "h")
         findReplaceItem.keyEquivalentModifierMask = [.command, .shift]
+        findReplaceItem.target = self
         findMenu.addItem(findReplaceItem)
         findMenu.addItem(NSMenuItem.separator())
-        findMenu.addItem(withTitle: "Find Next", action: #selector(NativeEditorViewController.findNext(_:)), keyEquivalent: "g")
-        let findPrevItem = NSMenuItem(title: "Find Previous", action: #selector(NativeEditorViewController.findPrevious(_:)), keyEquivalent: "g")
+        let nextItem = findMenu.addItem(withTitle: "Find Next", action: #selector(findNext(_:)), keyEquivalent: "g")
+        nextItem.target = self
+        let findPrevItem = NSMenuItem(title: "Find Previous", action: #selector(findPrevious(_:)), keyEquivalent: "g")
         findPrevItem.keyEquivalentModifierMask = [.command, .shift]
+        findPrevItem.target = self
         findMenu.addItem(findPrevItem)
         findMenu.addItem(NSMenuItem.separator())
-        let useSelectionItem = NSMenuItem(title: "Use Selection for Find", action: #selector(NativeEditorViewController.useSelectionForFind(_:)), keyEquivalent: "e")
+        let useSelectionItem = NSMenuItem(title: "Use Selection for Find", action: #selector(useSelectionForFind(_:)), keyEquivalent: "e")
+        useSelectionItem.target = self
         findMenu.addItem(useSelectionItem)
         findMenuItem.submenu = findMenu
         findMenuItem.title = "Find"

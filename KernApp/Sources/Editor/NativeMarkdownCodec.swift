@@ -533,11 +533,22 @@ enum NativeMarkdownCodec {
         }
     }()
 
+    /// Optional debug logging for table parsing. Evaluate once to avoid per-line env lookups.
+    private static let debugTableParseEnabled: Bool = {
+        ProcessInfo.processInfo.environment["KERN_DEBUG_TABLE_PARSE"] == "1"
+    }()
+
     private static func parseGfmTable(_ lines: [String], startIndex: Int) -> GfmTableMatch? {
         guard startIndex + 1 < lines.count else { return nil }
 
         let headerLine = lines[startIndex]
         let delimiterLine = lines[startIndex + 1]
+
+        let debug = debugTableParseEnabled
+        func dbg(_ message: String) {
+            guard debug else { return }
+            NSLog("[NativeMarkdownCodec.TableParse] %@", message)
+        }
 
         // Quick heuristic: both rows must contain at least one pipe.
         guard headerLine.contains("|"), delimiterLine.contains("|") else { return nil }
@@ -545,12 +556,23 @@ enum NativeMarkdownCodec {
         let headerCells = splitGfmTableRow(headerLine)
         let delimiterCells = splitGfmTableRow(delimiterLine)
 
+        if debug {
+            dbg("startIndex=\(startIndex) header=\(headerLine.debugDescription) delimiter=\(delimiterLine.debugDescription)")
+            dbg("headerCells=\(headerCells.map { $0.debugDescription }) delimiterCells=\(delimiterCells.map { $0.debugDescription })")
+        }
+
         // Tables require at least 2 columns to avoid false positives.
-        guard max(headerCells.count, delimiterCells.count) >= 2 else { return nil }
+        guard max(headerCells.count, delimiterCells.count) >= 2 else {
+            dbg("reject: <2 columns header=\(headerCells.count) delimiter=\(delimiterCells.count)")
+            return nil
+        }
 
         var alignments: [TableColumnAlignment] = []
         for c in delimiterCells {
-            guard let a = parseGfmTableDelimiterCell(c) else { return nil }
+            guard let a = parseGfmTableDelimiterCell(c) else {
+                dbg("reject: delimiter cell parse failed: \(c.debugDescription)")
+                return nil
+            }
             alignments.append(a)
         }
 
@@ -586,7 +608,10 @@ enum NativeMarkdownCodec {
     }
 
     private static func splitGfmTableRow(_ line: String) -> [String] {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // Be tolerant of different line endings (ex: CRLF sources can leave trailing `\r` after
+        // splitting on `\n`). Tables are line-oriented, so trimming newlines here is safe and
+        // prevents false negatives in delimiter parsing.
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
 
         let startsWithPipe = trimmed.first == "|"
@@ -626,7 +651,7 @@ enum NativeMarkdownCodec {
         if startsWithPipe, !cells.isEmpty { cells.removeFirst() }
         if endsWithPipe, !cells.isEmpty { cells.removeLast() }
 
-        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+        return cells.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
     private static func parseGfmTableDelimiterCell(_ cell: String) -> TableColumnAlignment? {
@@ -650,7 +675,7 @@ enum NativeMarkdownCodec {
         case (true, true): return .center
         case (true, false): return .left
         case (false, true): return .right
-        case (false, false): return .none
+        case (false, false): return TableColumnAlignment.none
         }
     }
 
