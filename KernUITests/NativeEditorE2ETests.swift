@@ -296,6 +296,43 @@ final class NativeEditorE2ETests: XCTestCase {
         XCTAssertTrue(saved.contains("| c | d |"))
     }
 
+    func testOpenFileWithGfmTableRendersWysiwygAndExportsStable() throws {
+        let tmp = try makeTempMarkdownFile(name: "kern-ui-table-open")
+        try """
+        Before paragraph.
+
+        | H1 | H2 |
+        | --- | --- |
+        | r1c1 | r1c2 |
+
+        After paragraph.
+        """.write(to: tmp, atomically: true, encoding: .utf8)
+
+        let app = makeApp(opening: tmp)
+        app.launch()
+
+        let textView = app.textViews["NativeEditor.TextView"]
+        XCTAssertTrue(textView.waitForExistence(timeout: 10))
+
+        let value = waitForTextViewValue(
+            textView,
+            timeout: 2.0,
+            description: "table import renders as WYSIWYG (no pipe syntax)"
+        ) { v in
+            v.contains("Before paragraph.") && v.contains("H1") && v.contains("H2") && v.contains("r1c1") && v.contains("r1c2") && !v.contains("| ---")
+        }
+        XCTAssertFalse(value.contains("|"), "WYSIWYG should not show table pipe syntax")
+        attachScreenshot(name: "open-table-render", element: textView)
+
+        try save(app: app)
+
+        let saved = try waitForFileContains(tmp, substring: "| H1 | H2 |", timeout: 5)
+        XCTAssertTrue(saved.contains("| --- | --- |"))
+        XCTAssertTrue(saved.contains("| r1c1 | r1c2 |"))
+        XCTAssertTrue(saved.contains("Before paragraph."))
+        XCTAssertTrue(saved.contains("After paragraph."))
+    }
+
     func testGfmLintRewritesHeadingCheckboxesOnSave() throws {
         let tmp = try makeTempMarkdownFile(name: "kern-ui-gfm-lint-heading-task")
         try "## [x] Heading todo\n".write(to: tmp, atomically: true, encoding: .utf8)
