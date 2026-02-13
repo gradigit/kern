@@ -1,0 +1,44 @@
+import Foundation
+
+// Custom attributes used by the native editor prototype to round-trip Markdown.
+// These are intentionally simple and string-keyed so they survive NSAttributedString editing.
+extension NSAttributedString.Key {
+    static let kernBlockKind = NSAttributedString.Key("kern.blockKind")
+    static let kernHeadingLevel = NSAttributedString.Key("kern.headingLevel")
+    static let kernMarker = NSAttributedString.Key("kern.marker") // Bool
+    static let kernOrderedIndex = NSAttributedString.Key("kern.orderedIndex") // Int
+    static let kernOrderedIsTask = NSAttributedString.Key("kern.orderedIsTask") // Bool
+    static let kernTaskStyle = NSAttributedString.Key("kern.taskStyle") // Int
+
+    static let kernStrong = NSAttributedString.Key("kern.strong") // Bool
+    static let kernEmphasis = NSAttributedString.Key("kern.emphasis") // Bool
+    static let kernInlineCode = NSAttributedString.Key("kern.inlineCode") // Bool
+
+    static let kernCheckbox = NSAttributedString.Key("kern.checkbox") // Bool
+    static let kernCheckboxChecked = NSAttributedString.Key("kern.checkboxChecked") // Bool
+
+    // Tables (GFM)
+    static let kernTableID = NSAttributedString.Key("kern.tableID") // Int
+    static let kernTableRow = NSAttributedString.Key("kern.tableRow") // Int
+    static let kernTableColumn = NSAttributedString.Key("kern.tableColumn") // Int
+    static let kernTableIsHeader = NSAttributedString.Key("kern.tableIsHeader") // Bool
+    static let kernTableColumnAlignment = NSAttributedString.Key("kern.tableColumnAlignment") // Int
+    static let kernTableColumnCount = NSAttributedString.Key("kern.tableColumnCount") // Int
+}
+
+enum KernBlockKind: Int {
+    case paragraph = 0
+    case heading = 1
+    case bullet = 2
+    case task = 3
+    case codeBlock = 4
+    case ordered = 5
+    case tableCell = 6
+}
+
+enum KernTaskStyle: Int {
+    /// `[ ] text` or `[] text` (Kern/Notion-style shortcut), renders as checkbox-only.
+    case standalone = 0
+    /// `- [ ] text` (GFM task list item), may render with or without a bullet depending on preferences.
+    case bulleted = 1
+}

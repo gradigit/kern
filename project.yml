@@ -1,0 +1,83 @@
+name: Kern
+options:
+  bundleIdPrefix: com.kern
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+
+packages:
+  SnapshotTesting:
+    url: https://github.com/pointfreeco/swift-snapshot-testing
+    from: 1.18.9
+
+schemes:
+  Kern:
+    build:
+      targets:
+        Kern: all
+    test:
+      targets:
+        - KernTests
+  KernUI:
+    build:
+      targets:
+        Kern: all
+    test:
+      targets:
+        - KernUITests
+
+targets:
+  Kern:
+    type: application
+    platform: macOS
+    sources:
+      - path: KernApp/Sources
+      - path: CoreEditor/dist
+        type: folder
+        buildPhase: resources
+      - path: KernApp/Resources/Assets.xcassets
+        buildPhase: resources
+    settings:
+      base:
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        INFOPLIST_FILE: KernApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: KernApp/Kern.entitlements
+        CODE_SIGN_IDENTITY: "-"
+        PRODUCT_BUNDLE_IDENTIFIER: com.kern.app
+        PRODUCT_NAME: Kern
+        GENERATE_INFOPLIST_FILE: false
+
+  KernTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: KernTests
+    dependencies:
+      - target: Kern
+      - package: SnapshotTesting
+    settings:
+      base:
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_IDENTITY: "-"
+
+  KernUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: KernUITests
+    dependencies:
+      - target: Kern
+    settings:
+      base:
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_IDENTITY: "-"

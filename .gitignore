@@ -1,0 +1,54 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+
+# XcodeGen output (regenerated from project.yml)
+Kern.xcodeproj/
+
+# Swift Package Manager
+.build/
+Packages/
+
+# Node.js (CoreEditor)
+CoreEditor/node_modules/
+
+# Playwright MCP artifacts and test outputs
+.playwright-mcp/
+CoreEditor/test-results/
+
+# Integration test screenshots
+test-screenshots/
+
+# Local test/bench artifacts
+test-results/
+bench-results/
+
+# Profiling data
+*.profraw
+
+# Claude workspace settings and session context (local only)
+.claude/
+CONTEXT-RESTORE.md
+.worktrees

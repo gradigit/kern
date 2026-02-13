@@ -1,0 +1,76 @@
+# Documentation manifest for Kern
+# Tracks all project docs, their types, and code references
+# Updated by syncing-docs skill
+
+last_synced: "2026-02-01T19:44:01Z"
+
+files:
+  - path: README.md
+    type: readme
+    last_updated: "2026-02-01T19:50:00Z"
+    description: Public-facing project README for new users and contributors
+
+  - path: CLAUDE.md
+    type: project-instructions
+    last_updated: "2026-02-01T19:44:01Z"
+    description: Project instructions for Claude Code sessions
+    references:
+      - KernApp/Sources/App/AppDelegate.swift
+      - KernApp/Sources/Editor/EditorDocument.swift
+      - KernApp/Sources/Editor/EditorViewController.swift
+      - KernApp/Sources/Editor/EditorWindowController.swift
+      - KernApp/Sources/Editor/EditorReusePool.swift
+      - KernApp/Sources/Bridge/WebBridge.swift
+      - KernApp/Sources/Bridge/NativeBridge.swift
+      - CoreEditor/src/main.ts
+      - CoreEditor/src/bridge.ts
+      - CoreEditor/src/mermaid.ts
+      - CoreEditor/src/checkbox.ts
+      - CoreEditor/src/search.ts
+      - CoreEditor/src/toast.ts
+      - CoreEditor/src/inline-nested.ts
+
+  - path: TODO.md
+    type: task-tracker
+    last_updated: "2026-02-01T19:44:01Z"
+    description: Persistent task list with completed phases, current state, and pending items
+
+  - path: CONTEXT-RESTORE.md
+    type: session-restore
+    last_updated: "2026-02-01T19:44:01Z"
+    description: Paste-ready prompt for restoring session context after context clears
+    references:
+      - CoreEditor/src/checkbox.ts
+      - CoreEditor/src/main.ts
+      - CoreEditor/src/bridge.ts
+      - CoreEditor/src/themes/kern.css
+      - CoreEditor/src/inline-nested.ts
+      - KernApp/Sources/App/AppDelegate.swift
+
+  - path: KERN-MARKDOWN.md
+    type: spec
+    last_updated: "2026-02-01T19:44:01Z"
+    description: Documents Kern's markdown syntax extensions vs GFM spec
+    references:
+      - CoreEditor/src/checkbox.ts
+      - CoreEditor/src/main.ts
+
+  - path: MANUAL-TESTING.md
+    type: checklist
+    last_updated: "2026-02-01T19:44:01Z"
+    description: Manual testing checklist for UI changes requiring human verification
+
+  - path: architect/plan.md
+    type: architecture
+    last_updated: "2025-01-01T00:00:00Z"
+    description: Implementation plan with step-by-step build instructions per phase
+
+  - path: architect/prompt.md
+    type: architecture
+    last_updated: "2025-01-01T00:00:00Z"
+    description: Architecture spec used as input to generate plan.md
+
+  - path: architect/transcript.md
+    type: architecture
+    last_updated: "2025-01-01T00:00:00Z"
+    description: Design questionnaire recording decision rationale

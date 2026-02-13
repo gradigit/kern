@@ -1,0 +1,10 @@
+{
+  "name": "gfm.extensionsEnabled",
+  "expected": "extensions.gfm.extensionsEnabled.out.md",
+  "options": {
+    "exportDialect": "gfm",
+    "orderedTasksEnabled": true,
+    "headingCheckboxesEnabled": true
+  }
+}
+
