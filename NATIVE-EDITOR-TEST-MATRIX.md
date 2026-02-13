@@ -46,8 +46,8 @@ Preferences are controlled via:
 | File reload on disk change | External write triggers reload + toast; editor updates content | (N/A) | `testReloadOnDiskChangeShowsToastAndUpdatesContent` | Toast is labeled `NativeEditor.ReloadToast` for UI assertions |
 | Find / Replace | Find bar is native + testable; replace mutates document deterministically | (N/A) | `testFindReplaceReplacesMatchesInOrder` | Find UI is `NativeEditor.FindBar` (no system Find panel dependency) |
 | Checkbox click hit-target | Clicking checkbox glyph toggles; optional marker-region toggles | options tests | `testCheckboxHitTargetGlyphTogglesByClick` (gated), `testCheckboxHitTargetMarkerTogglesWhenEnabled` (gated) | Coordinate-based clicks can be flaky; gated behind exhaustive UI |
-| Visual regression | Stable rendering across changes | Snapshot tests (gated) | UI screenshots attached always | Enable with `KERN_ENABLE_SNAPSHOT_TESTS=1` |
-| Future Markdown features | Blockquotes, images, strikethrough, autolinks, nested lists, etc. | `KernTests/NativeMarkdownCodecFutureSpecTests.swift` (gated + expected-failure) | None yet | Enable with `KERN_ENABLE_EXHAUSTIVE_TESTS=1` |
+| Visual regression | Stable rendering across changes | Snapshot tests (gated) | UI screenshots attached always | Enable with `./scripts/test-native-editor.sh --unit-only --snapshots` |
+| Future Markdown features | Blockquotes, images, strikethrough, autolinks, nested lists, etc. | `KernTests/NativeMarkdownCodecFutureSpecTests.swift` (gated + expected-failure) | None yet | Enable with `./scripts/test-native-editor.sh --unit-only --exhaustive` |
 
 ## Running
 
@@ -65,5 +65,7 @@ Preferences are controlled via:
   - Exhaustive UI matrix:
     - `./scripts/test-native-editor.sh --ui-only --exhaustive`
 - Snapshots (optional):
-  - `KERN_ENABLE_SNAPSHOT_TESTS=1 xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit test`
-  - `KERN_ENABLE_SNAPSHOT_TESTS=1 KERN_RECORD_SNAPSHOTS=1 xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit test`
+  - `./scripts/test-native-editor.sh --unit-only --snapshots`
+  - Record baselines (writes `KernTests/__Snapshots__/*`): `./scripts/test-native-editor.sh --unit-only --record-snapshots`
+  - Exhaustive snapshot matrix: add `--exhaustive`
+  - Direct (advanced): `xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKitSnapshots test`

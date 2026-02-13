@@ -35,12 +35,12 @@ else
 fi
 
 echo ""
-echo "▸ Running performance tests (scheme: KernTextKit)..."
+echo "▸ Running performance tests (scheme: KernTextKitPerf)..."
 
 set +e
-KERN_ENABLE_PERF_TESTS=1 xcodebuild \
+xcodebuild \
   -project KernTextKit.xcodeproj \
-  -scheme KernTextKit \
+  -scheme KernTextKitPerf \
   -derivedDataPath "$DERIVED_DATA_PATH" \
   -resultBundlePath "$OUT_DIR/KernTextKitPerf.xcresult" \
   test \

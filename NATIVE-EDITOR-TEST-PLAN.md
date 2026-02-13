@@ -113,10 +113,10 @@ Two modes:
 
 Implemented (gated):
 - `KernTests/NativeEditorSnapshotTests.swift` (SnapshotTesting)
-- Env vars:
-  - `KERN_ENABLE_SNAPSHOT_TESTS=1` to run
-  - `KERN_RECORD_SNAPSHOTS=1` to record baselines
-  - `KERN_ENABLE_EXHAUSTIVE_TESTS=1` to run the full snapshot matrix
+- Runner flags / schemes:
+  - Run snapshots: `./scripts/test-native-editor.sh --unit-only --snapshots` (scheme: `KernTextKitSnapshots`)
+  - Record baselines: `./scripts/test-native-editor.sh --unit-only --record-snapshots` (scheme: `KernTextKitRecordSnapshots`)
+  - Full snapshot matrix: add `--exhaustive` (scheme: `KernTextKitSnapshotsExhaustive`)
 
 ### 6) Performance
 

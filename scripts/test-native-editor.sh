@@ -42,11 +42,12 @@ echo "=== Kern Native Editor Tests ==="
 echo "Output: $OUT_DIR"
 echo "DerivedData: $DERIVED_DATA_PATH"
 echo ""
+echo "Modes:"
+echo "  --snapshots          Run snapshot tests (via scheme: KernTextKitSnapshots)"
+echo "  --record-snapshots   Record snapshot baselines (via scheme: KernTextKitRecordSnapshots)"
+echo "  --exhaustive         Enable exhaustive (slow) tests (via *Exhaustive schemes)"
+echo ""
 echo "Env toggles (optional):"
-echo "  KERN_ENABLE_SNAPSHOT_TESTS=1   Run snapshot tests (otherwise skipped)"
-echo "  KERN_RECORD_SNAPSHOTS=1        Record snapshot baselines (with snapshots enabled)"
-echo "  KERN_ENABLE_EXHAUSTIVE_TESTS=1 Run exhaustive spec placeholders (otherwise skipped)"
-echo "  KERN_ENABLE_PERF_TESTS=1       Run perf tests (otherwise skipped)"
 echo "  KERN_EXPORT_UI_ATTACHMENTS=1   Always export UI attachments (otherwise only on failure)"
 echo "  KERN_UI_SCREENSHOTS=always     Keep UI screenshots on success (default)"
 echo "  KERN_UI_SCREENSHOTS=failure    Only keep UI screenshots on failure (faster)"
@@ -54,18 +55,22 @@ echo "  KERN_UI_SCREENSHOTS=off        Disable UI screenshots (fastest)"
 echo "  KERN_UI_SCREENSHOT_DIR=/path   Write UI PNGs to disk (runner sets automatically)"
 echo ""
 
-UNIT_ENV=()
-UI_ENV=()
+UNIT_SCHEME="KernTextKit"
+if [ "$RECORD_SNAPSHOTS" = true ] && [ "$ENABLE_EXHAUSTIVE" = true ]; then
+  UNIT_SCHEME="KernTextKitRecordSnapshotsExhaustive"
+elif [ "$RECORD_SNAPSHOTS" = true ]; then
+  UNIT_SCHEME="KernTextKitRecordSnapshots"
+elif [ "$ENABLE_SNAPSHOTS" = true ] && [ "$ENABLE_EXHAUSTIVE" = true ]; then
+  UNIT_SCHEME="KernTextKitSnapshotsExhaustive"
+elif [ "$ENABLE_SNAPSHOTS" = true ]; then
+  UNIT_SCHEME="KernTextKitSnapshots"
+elif [ "$ENABLE_EXHAUSTIVE" = true ]; then
+  UNIT_SCHEME="KernTextKitExhaustive"
+fi
 
+UI_SCHEME="KernTextKitUI"
 if [ "$ENABLE_EXHAUSTIVE" = true ]; then
-  UNIT_ENV+=("KERN_ENABLE_EXHAUSTIVE_TESTS=1")
-  UI_ENV+=("KERN_ENABLE_EXHAUSTIVE_TESTS=1")
-fi
-if [ "$ENABLE_SNAPSHOTS" = true ]; then
-  UNIT_ENV+=("KERN_ENABLE_SNAPSHOT_TESTS=1")
-fi
-if [ "$RECORD_SNAPSHOTS" = true ]; then
-  UNIT_ENV+=("KERN_RECORD_SNAPSHOTS=1")
+  UI_SCHEME="KernTextKitUIExhaustive"
 fi
 
 NEED_XCODEGEN=true
@@ -86,60 +91,83 @@ fi
 echo ""
 
 if [ "$RUN_UNIT" = true ]; then
-  echo "▸ Running unit tests (scheme: KernTextKit)..."
-  set +e
-  if [ "${#UNIT_ENV[@]}" -gt 0 ]; then
-    env "${UNIT_ENV[@]}" xcodebuild \
-      -project KernTextKit.xcodeproj \
-      -scheme KernTextKit \
-      -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernTextKitTests.xcresult" \
-      test \
-      2>&1 | tee "$OUT_DIR/unit.log"
-  else
+  if [ "$RECORD_SNAPSHOTS" = true ]; then
+    # SnapshotTesting intentionally fails tests while recording, so we:
+    # 1) run record mode (expected failure, but writes baselines)
+    # 2) re-run in verify mode (must pass)
+    if [ "$ENABLE_EXHAUSTIVE" = true ]; then
+      VERIFY_SCHEME="KernTextKitSnapshotsExhaustive"
+    else
+      VERIFY_SCHEME="KernTextKitSnapshots"
+    fi
+
+    echo "▸ Recording snapshot baselines (scheme: $UNIT_SCHEME)..."
+    set +e
     xcodebuild \
       -project KernTextKit.xcodeproj \
-      -scheme KernTextKit \
+      -scheme "$UNIT_SCHEME" \
+      -derivedDataPath "$DERIVED_DATA_PATH" \
+      -resultBundlePath "$OUT_DIR/KernTextKitTests.record.xcresult" \
+      test \
+      2>&1 | tee "$OUT_DIR/unit-record.log"
+    RECORD_STATUS=${PIPESTATUS[0]}
+    set -e
+    echo "  (record mode exit $RECORD_STATUS is expected)"
+    echo ""
+
+    echo "▸ Verifying snapshots (scheme: $VERIFY_SCHEME)..."
+    set +e
+    xcodebuild \
+      -project KernTextKit.xcodeproj \
+      -scheme "$VERIFY_SCHEME" \
       -derivedDataPath "$DERIVED_DATA_PATH" \
       -resultBundlePath "$OUT_DIR/KernTextKitTests.xcresult" \
       test \
       2>&1 | tee "$OUT_DIR/unit.log"
+    UNIT_STATUS=${PIPESTATUS[0]}
+    set -e
+    if [ $UNIT_STATUS -ne 0 ]; then
+      echo "Snapshot verification failed (exit $UNIT_STATUS). See: $OUT_DIR/unit.log" >&2
+      exit $UNIT_STATUS
+    fi
+    echo "  ✓ Snapshot verification passed"
+    echo ""
+  else
+    echo "▸ Running unit tests (scheme: $UNIT_SCHEME)..."
+    set +e
+    xcodebuild \
+      -project KernTextKit.xcodeproj \
+      -scheme "$UNIT_SCHEME" \
+      -derivedDataPath "$DERIVED_DATA_PATH" \
+      -resultBundlePath "$OUT_DIR/KernTextKitTests.xcresult" \
+      test \
+      2>&1 | tee "$OUT_DIR/unit.log"
+    UNIT_STATUS=${PIPESTATUS[0]}
+    set -e
+    if [ $UNIT_STATUS -ne 0 ]; then
+      echo "Unit tests failed (exit $UNIT_STATUS). See: $OUT_DIR/unit.log" >&2
+      exit $UNIT_STATUS
+    fi
+    echo "  ✓ Unit tests passed"
+    echo ""
   fi
-  UNIT_STATUS=${PIPESTATUS[0]}
-  set -e
-  if [ $UNIT_STATUS -ne 0 ]; then
-    echo "Unit tests failed (exit $UNIT_STATUS). See: $OUT_DIR/unit.log" >&2
-    exit $UNIT_STATUS
-  fi
-  echo "  ✓ Unit tests passed"
-  echo ""
 fi
 
 if [ "$RUN_UI" = true ]; then
-  echo "▸ Running UI tests (scheme: KernTextKitUI)..."
+  echo "▸ Running UI tests (scheme: $UI_SCHEME)..."
   echo "  Preflight: Ensure the Mac is unlocked and Automation permissions are granted."
 
   set +e
   UI_SCREENSHOT_DIR="$OUT_DIR/ui-screenshots"
   mkdir -p "$UI_SCREENSHOT_DIR"
 
-  if [ "${#UI_ENV[@]}" -gt 0 ]; then
-    env "${UI_ENV[@]}" KERN_UI_SCREENSHOT_DIR="$UI_SCREENSHOT_DIR" xcodebuild \
-      -project KernTextKit.xcodeproj \
-      -scheme KernTextKitUI \
-      -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
-      test \
-      2>&1 | tee "$OUT_DIR/ui.log"
-  else
-    env KERN_UI_SCREENSHOT_DIR="$UI_SCREENSHOT_DIR" xcodebuild \
-      -project KernTextKit.xcodeproj \
-      -scheme KernTextKitUI \
-      -derivedDataPath "$DERIVED_DATA_PATH" \
-      -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
-      test \
-      2>&1 | tee "$OUT_DIR/ui.log"
-  fi
+  env KERN_UI_SCREENSHOT_DIR="$UI_SCREENSHOT_DIR" xcodebuild \
+    -project KernTextKit.xcodeproj \
+    -scheme "$UI_SCHEME" \
+    -derivedDataPath "$DERIVED_DATA_PATH" \
+    -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
+    test \
+    2>&1 | tee "$OUT_DIR/ui.log"
   UI_STATUS=${PIPESTATUS[0]}
   set -e
 
