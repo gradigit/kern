@@ -38,6 +38,35 @@ DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-/tmp/kern-derived-data-tests}"
 
 mkdir -p "$OUT_DIR"
 
+ALWAYS_EXPORT_ATTACHMENTS=false
+if [ "${KERN_EXPORT_UI_ATTACHMENTS:-}" = "1" ] || [ "$EXPORT_UI_ATTACHMENTS" = true ]; then
+  ALWAYS_EXPORT_ATTACHMENTS=true
+fi
+
+UI_RESULT_BUNDLE="$OUT_DIR/KernTextKitUI.xcresult"
+
+export_ui_attachments() {
+  if [ ! -d "$UI_RESULT_BUNDLE" ]; then
+    return 0
+  fi
+
+  echo "▸ Exporting UI test attachments (screenshots/logs)..."
+  ATT_DIR="$OUT_DIR/ui-attachments"
+  mkdir -p "$ATT_DIR"
+  xcrun xcresulttool export attachments \
+    --path "$UI_RESULT_BUNDLE" \
+    --output-path "$ATT_DIR" \
+    >/dev/null 2>&1 || true
+  # xcresulttool can export screenshots as HEIC depending on Xcode/macOS.
+  # Convert to PNG for tooling compatibility (keeps original .heic files).
+  "$(pwd)/scripts/convert-heic-to-png.sh" "$ATT_DIR" >/dev/null 2>&1 || true
+  echo "  Attachments: $ATT_DIR"
+}
+
+# If the UI runner (or the system) crashes mid-test (e.g., WindowServer restarts), still try to
+# export whatever artifacts were produced so failures are diagnosable.
+trap 'if [ "$RUN_UI" = true ] && [ "$ALWAYS_EXPORT_ATTACHMENTS" = true ]; then export_ui_attachments; fi' EXIT INT TERM
+
 echo "=== Kern Native Editor Tests ==="
 echo "Output: $OUT_DIR"
 echo "DerivedData: $DERIVED_DATA_PATH"
@@ -176,6 +205,8 @@ if [ "$RUN_UI" = true ]; then
     -scheme "$UI_SCHEME" \
     -derivedDataPath "$DERIVED_DATA_PATH" \
     -resultBundlePath "$OUT_DIR/KernTextKitUI.xcresult" \
+    -parallel-testing-enabled NO \
+    -maximum-parallel-testing-workers 1 \
     test \
     2>&1 | tee "$OUT_DIR/ui.log"
   UI_STATUS=${PIPESTATUS[0]}
@@ -204,25 +235,8 @@ if [ "$RUN_UI" = true ]; then
   fi
 
   echo ""
-  ALWAYS_EXPORT_ATTACHMENTS=false
-  if [ "${KERN_EXPORT_UI_ATTACHMENTS:-}" = "1" ] || [ "$EXPORT_UI_ATTACHMENTS" = true ]; then
-    ALWAYS_EXPORT_ATTACHMENTS=true
-  fi
-
   if [ $UI_STATUS -ne 0 ] || [ "$ALWAYS_EXPORT_ATTACHMENTS" = true ]; then
-    echo "▸ Exporting UI test attachments (screenshots/logs)..."
-    ATT_DIR="$OUT_DIR/ui-attachments"
-    mkdir -p "$ATT_DIR"
-    xcrun xcresulttool export attachments \
-      --path "$OUT_DIR/KernTextKitUI.xcresult" \
-      --output-path "$ATT_DIR" \
-      2>&1 | tee "$OUT_DIR/xcresult-attachments.log" >/dev/null || true
-    # xcresulttool can export screenshots as HEIC depending on Xcode/macOS.
-    # Convert to PNG for tooling compatibility (keeps original .heic files).
-    if ls "$ATT_DIR"/*.heic "$ATT_DIR"/*.HEIC >/dev/null 2>&1; then
-      "$(pwd)/scripts/convert-heic-to-png.sh" "$ATT_DIR" >/dev/null || true
-    fi
-    echo "  Attachments: $ATT_DIR"
+    export_ui_attachments
   else
     echo "▸ Skipping UI attachment export (set KERN_EXPORT_UI_ATTACHMENTS=1 or pass --export-ui-attachments)"
   fi
