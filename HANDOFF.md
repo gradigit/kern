@@ -12,8 +12,9 @@ That has been completed.
 
 - Repo: `/Users/aaaaa/Projects/Kern-textkit`
 - Branch: `main`
-- HEAD: `17a45e0` before wrap-doc refresh in this pass
-- Working tree at this handoff moment: expected clean except wrap-doc updates if not yet committed
+- HEAD: `9913b27`
+- Previous functional scoped stack tip: `17a45e0`
+- Working tree at this handoff moment: clean
 
 Quick verify commands:
 
@@ -92,4 +93,3 @@ Requested wrap chain: `sync-docs -> claude-md-improver -> handoff`
 1. If baseline is green, push the scoped commit stack.
 2. If baseline fails, fix in a new commit on top; do not amend prior scoped commits.
 3. Re-run `$wrap` before session end if more commits are added.
-
