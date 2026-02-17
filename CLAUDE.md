@@ -75,6 +75,7 @@ Strict markdown conformance:
 - Packaging script avoids broad `rm -rf` patterns; use guarded directory deletion helper in `scripts/package-kern-app.sh`.
 - XCUI test target (`KernUITests/`) was removed; all tests are unit tests now. `--unit-only` is a no-op compat flag.
 - Simulating Enter in unit tests: `textView.insertNewline(nil)` (not key events). Shift+Enter: `textView.insertLineBreak(nil)`.
+- `NativeMarkdownCodec.importMarkdown` passes `ImportContext` struct through ~13 functions instead of using statics. Add new import-time state to `ImportContext`, not static vars.
 
 ## Key Environment Flags
 
