@@ -87,10 +87,11 @@ Strict markdown conformance:
 See full report: docs/reviews/codebase-review-2026-02-17.md
 
 Critical data-loss paths (remaining):
-- Reference definitions inside blockquotes silently missed during import pre-scan
-- Global mutable static state makes `importMarkdown` non-reentrant (review finding #5)
+- (none — all critical findings resolved)
 
 Fixed (2026-02-18):
+- ~~Reference definitions inside blockquotes silently missed~~ (66ae0db)
+- ~~Global mutable static state makes `importMarkdown` non-reentrant~~ (ImportContext refactor)
 - ~~`windowWillClose` does not flush export debounce~~ (f85145d)
 - ~~`applicationShouldTerminate` drops unflushed edits~~ (f85145d)
 - ~~`lastKnownFileModDate` data race~~ (b58ed02)

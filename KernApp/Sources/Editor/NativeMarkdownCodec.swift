@@ -14,11 +14,13 @@ enum NativeMarkdownCodec {
         let title: String?
     }
 
-    /// Import-time reference definitions used by inline parsing (`[text][id]`, `![alt][id]`).
-    private static var activeReferenceDefinitions: [String: ReferenceDefinition] = [:]
-    private static var activeImportBaseURL: URL?
-    private static var activeImportOptions: Options = .init()
-    private static var activeStrictConformanceRoundTripMode: Bool = false
+    /// Import-time context passed through the call chain instead of static mutable state.
+    private struct ImportContext {
+        let referenceDefinitions: [String: ReferenceDefinition]
+        let baseURL: URL?
+        let options: Options
+        let strictConformanceRoundTripMode: Bool
+    }
 
     struct Options: Equatable {
         enum ExportDialect: String {
@@ -132,16 +134,12 @@ enum NativeMarkdownCodec {
                 }
             }
         }
-        activeReferenceDefinitions = referenceDefinitions
-        activeImportBaseURL = baseURL
-        activeImportOptions = options
-        activeStrictConformanceRoundTripMode = options.strictConformanceRoundTripMode
-        defer {
-            activeReferenceDefinitions.removeAll(keepingCapacity: false)
-            activeImportBaseURL = nil
-            activeImportOptions = .init()
-            activeStrictConformanceRoundTripMode = false
-        }
+        let ctx = ImportContext(
+            referenceDefinitions: referenceDefinitions,
+            baseURL: baseURL,
+            options: options,
+            strictConformanceRoundTripMode: options.strictConformanceRoundTripMode
+        )
 
         // For GFM-style ordered list semantics, only the first marker matters and the rest are
         // normalized sequentially. Track per-depth counters so nested ordered lists restart.
@@ -201,7 +199,7 @@ enum NativeMarkdownCodec {
             if let definition = parseReferenceDefinition(line) {
                 resetOrderedCounters()
                 let visible = definition.destination
-                let para = NSMutableAttributedString(attributedString: parseInline(visible, baseFont: baseFont))
+                let para = NSMutableAttributedString(attributedString: parseInline(visible, baseFont: baseFont, ctx: ctx))
                 applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
                 if para.length > 0 {
                     let full = NSRange(location: 0, length: para.length)
@@ -408,7 +406,8 @@ enum NativeMarkdownCodec {
                     match.table,
                     tableID: tableID,
                     baseFont: baseFont,
-                    terminateLastParagraph: terminateLastParagraph
+                    terminateLastParagraph: terminateLastParagraph,
+                    ctx: ctx
                 )
                 result.append(tableAttr)
                 i = match.endIndex
@@ -437,7 +436,8 @@ enum NativeMarkdownCodec {
                         level: heading.level,
                         checked: headingTask.checked,
                         text: headingTask.text,
-                        baseFont: baseFont
+                        baseFont: baseFont,
+                        ctx: ctx
                     ))
                     applyQuoteAttributes(para, quoteDepth: quoteDepth)
                     result.append(para)
@@ -448,7 +448,7 @@ enum NativeMarkdownCodec {
                     continue
                 }
 
-                let content = parseInline(heading.text, baseFont: baseFont)
+                let content = parseInline(heading.text, baseFont: baseFont, ctx: ctx)
                 let para = NSMutableAttributedString(attributedString: content)
                 if para.length == 0 {
                     let placeholder = NSAttributedString(
@@ -478,7 +478,7 @@ enum NativeMarkdownCodec {
             //   ========   /   --------
             if let setext = parseSetextHeading(lines, startIndex: i, quoteDepth: quoteDepth, options: options) {
                 resetOrderedCounters()
-                let content = parseInline(setext.text, baseFont: baseFont)
+                let content = parseInline(setext.text, baseFont: baseFont, ctx: ctx)
                 let para = NSMutableAttributedString(attributedString: content)
                 if para.length == 0 {
                     let placeholder = NSAttributedString(
@@ -506,7 +506,7 @@ enum NativeMarkdownCodec {
             // Bullet/standalone task: - [ ] text / * [ ] text / + [ ] text / [] text / [ ] text
             if let task = parseTask(line) {
                 resetOrderedCounters()
-                var (combined, pendingHardBreak) = stripHardBreakMarker(task.text)
+                var (combined, pendingHardBreak) = stripHardBreakMarker(task.text, ctx: ctx)
                 let markerWidth: Int
                 switch task.style {
                 case .bulleted:
@@ -537,7 +537,7 @@ enum NativeMarkdownCodec {
                         break
                     }
 
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped)
+                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
                     if let marker = pendingHardBreak {
                         combined += hardBreakLiteral(marker)
                     }
@@ -554,7 +554,8 @@ enum NativeMarkdownCodec {
                     indent: task.indent,
                     depth: task.depth,
                     baseFont: baseFont,
-                    options: options
+                    options: options,
+                    ctx: ctx
                 ))
                 applyQuoteAttributes(para, quoteDepth: quoteDepth)
                 result.append(para)
@@ -572,7 +573,7 @@ enum NativeMarkdownCodec {
                     resetOrderedCounters()
                 }
 
-                var (combined, pendingHardBreak) = stripHardBreakMarker(orderedTask.text)
+                var (combined, pendingHardBreak) = stripHardBreakMarker(orderedTask.text, ctx: ctx)
                 let continuationIndent = String(repeating: " ", count: orderedTask.indent + orderedTask.markerLen)
                 var j = i + 1
                 while j < lines.count {
@@ -592,7 +593,7 @@ enum NativeMarkdownCodec {
                         break
                     }
 
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped)
+                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
                     if let marker = pendingHardBreak {
                         combined += hardBreakLiteral(marker)
                     }
@@ -616,7 +617,8 @@ enum NativeMarkdownCodec {
                     (normalizedIndex, orderedTask.checked, combined),
                     indent: orderedTask.indent,
                     depth: orderedTask.depth,
-                    baseFont: baseFont
+                    baseFont: baseFont,
+                    ctx: ctx
                 ))
                 applyQuoteAttributes(para, quoteDepth: quoteDepth)
                 result.append(para)
@@ -634,7 +636,7 @@ enum NativeMarkdownCodec {
             // This avoids implicitly opting into non-standard Markdown behavior in the default GFM profile.
             if !options.orderedTasksEnabled, parseOrderedTask(line) != nil {
                 resetOrderedCounters()
-                let para = NSMutableAttributedString(attributedString: parseInline(line, baseFont: baseFont))
+                let para = NSMutableAttributedString(attributedString: parseInline(line, baseFont: baseFont, ctx: ctx))
                 applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
                 applyQuoteAttributes(para, quoteDepth: quoteDepth)
                 result.append(para)
@@ -659,7 +661,8 @@ enum NativeMarkdownCodec {
                     (normalizedIndex, ordered.markerPadding, ""),
                     indent: ordered.indent,
                     depth: ordered.depth,
-                    baseFont: baseFont
+                    baseFont: baseFont,
+                    ctx: ctx
                 ))
                 applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
                 result.append(markerPara)
@@ -728,7 +731,7 @@ enum NativeMarkdownCodec {
 
             // Ordered list: 1. text
             if let ordered = parseOrdered(line) {
-                var (combined, pendingHardBreak) = stripHardBreakMarker(ordered.text)
+                var (combined, pendingHardBreak) = stripHardBreakMarker(ordered.text, ctx: ctx)
                 let continuationIndent = String(repeating: " ", count: ordered.indent + ordered.markerLen)
                 var j = i + 1
                 while j < lines.count {
@@ -748,7 +751,7 @@ enum NativeMarkdownCodec {
                         break
                     }
 
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped)
+                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
                     if let marker = pendingHardBreak {
                         combined += hardBreakLiteral(marker)
                     }
@@ -772,7 +775,8 @@ enum NativeMarkdownCodec {
                     (normalizedIndex, ordered.markerPadding, combined),
                     indent: ordered.indent,
                     depth: ordered.depth,
-                    baseFont: baseFont
+                    baseFont: baseFont,
+                    ctx: ctx
                 ))
                 applyQuoteAttributes(para, quoteDepth: quoteDepth)
                 result.append(para)
@@ -788,7 +792,7 @@ enum NativeMarkdownCodec {
                 resetOrderedCounters()
 
                 let markerPara = NSMutableAttributedString(
-                    attributedString: makeBulletParagraph("", marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont)
+                    attributedString: makeBulletParagraph("", marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, ctx: ctx)
                 )
                 applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
                 result.append(markerPara)
@@ -858,7 +862,7 @@ enum NativeMarkdownCodec {
             // Bullet list: - text
             if let bullet = parseBullet(line) {
                 resetOrderedCounters()
-                var (combined, pendingHardBreak) = stripHardBreakMarker(bullet.text)
+                var (combined, pendingHardBreak) = stripHardBreakMarker(bullet.text, ctx: ctx)
                 let continuationIndent = String(repeating: " ", count: bullet.indent + 1 + max(1, bullet.markerPadding.count))
                 var j = i + 1
                 while j < lines.count {
@@ -878,7 +882,7 @@ enum NativeMarkdownCodec {
                         break
                     }
 
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped)
+                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
                     if let marker = pendingHardBreak {
                         combined += hardBreakLiteral(marker)
                     }
@@ -891,7 +895,7 @@ enum NativeMarkdownCodec {
                 }
 
                 let para = NSMutableAttributedString(
-                    attributedString: makeBulletParagraph(combined, marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont)
+                    attributedString: makeBulletParagraph(combined, marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, ctx: ctx)
                 )
                 applyQuoteAttributes(para, quoteDepth: quoteDepth)
                 result.append(para)
@@ -904,7 +908,7 @@ enum NativeMarkdownCodec {
 
             // Plain paragraph (including empty line)
             resetOrderedCounters()
-            var (combined, pendingHardBreak) = stripHardBreakMarker(line)
+            var (combined, pendingHardBreak) = stripHardBreakMarker(line, ctx: ctx)
             var j = i + 1
             while j < lines.count {
                 var nextLine = lines[j]
@@ -935,7 +939,7 @@ enum NativeMarkdownCodec {
                     break
                 }
 
-                let (nextText, nextHardBreak) = stripHardBreakMarker(nextLine)
+                let (nextText, nextHardBreak) = stripHardBreakMarker(nextLine, ctx: ctx)
                 combined += (pendingHardBreak != nil ? "\u{2028}" : "\n") + nextText
                 pendingHardBreak = nextHardBreak
                 j += 1
@@ -944,7 +948,7 @@ enum NativeMarkdownCodec {
                 combined += hardBreakLiteral(marker)
             }
 
-            let para = NSMutableAttributedString(attributedString: parseInline(combined, baseFont: baseFont))
+            let para = NSMutableAttributedString(attributedString: parseInline(combined, baseFont: baseFont, ctx: ctx))
             applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
             applyQuoteAttributes(para, quoteDepth: quoteDepth)
             result.append(para)
@@ -1581,7 +1585,7 @@ enum NativeMarkdownCodec {
         return out
     }
 
-    private static func makeGfmTableAttributed(_ table: GfmTable, tableID: Int, baseFont: NSFont, terminateLastParagraph: Bool) -> NSAttributedString {
+    private static func makeGfmTableAttributed(_ table: GfmTable, tableID: Int, baseFont: NSFont, terminateLastParagraph: Bool, ctx: ImportContext) -> NSAttributedString {
         let out = NSMutableAttributedString()
 
         let textTable = NSTextTable()
@@ -1616,7 +1620,8 @@ enum NativeMarkdownCodec {
                     isHeader: isHeader,
                     alignment: alignment,
                     columnCount: table.columnCount,
-                    terminatesParagraph: terminates
+                    terminatesParagraph: terminates,
+                    ctx: ctx
                 )
                 out.append(cellPara)
             }
@@ -1635,11 +1640,12 @@ enum NativeMarkdownCodec {
         isHeader: Bool,
         alignment: TableColumnAlignment,
         columnCount: Int,
-        terminatesParagraph: Bool
+        terminatesParagraph: Bool,
+        ctx: ImportContext
     ) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
-        para.append(parseInline(text, baseFont: baseFont))
+        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
 
         if terminatesParagraph {
             para.append(NSAttributedString(string: "\n", attributes: baseAttributes(baseFont: baseFont)))
@@ -2361,7 +2367,8 @@ enum NativeMarkdownCodec {
         indent: Int,
         depth: Int,
         baseFont: NSFont,
-        options: Options
+        options: Options,
+        ctx: ImportContext
     ) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
@@ -2386,7 +2393,7 @@ enum NativeMarkdownCodec {
         para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
         para.append(NSAttributedString(string: " ", attributes: markerAttrs))
 
-        let content = parseInline(task.text, baseFont: baseFont)
+        let content = parseInline(task.text, baseFont: baseFont, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
@@ -2408,7 +2415,7 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeHeadingWithCheckbox(level: Int, checked: Bool, text: String, baseFont: NSFont) -> NSAttributedString {
+    private static func makeHeadingWithCheckbox(level: Int, checked: Bool, text: String, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
         let heading = headingFont(level: level)
@@ -2431,7 +2438,7 @@ enum NativeMarkdownCodec {
         para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
         para.append(NSAttributedString(string: " ", attributes: markerAttrs))
 
-        para.append(parseInline(text, baseFont: baseFont))
+        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
 
         applyBlockAttributes(para, kind: .heading, baseFont: baseFont, headingLevel: max(1, min(6, level)))
 
@@ -2446,14 +2453,14 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeBulletParagraph(_ text: String, marker: Character, markerPadding: String, indent: Int, depth: Int, baseFont: NSFont) -> NSAttributedString {
+    private static func makeBulletParagraph(_ text: String, marker: Character, markerPadding: String, indent: Int, depth: Int, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
         let para = NSMutableAttributedString()
         let markerAttrs = baseAttributes(baseFont: baseFont).merging(
             [.kernMarker: true],
             uniquingKeysWith: { $1 }
         )
         para.append(NSAttributedString(string: "• ", attributes: markerAttrs))
-        para.append(parseInline(text, baseFont: baseFont))
+        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernListDepth, value: max(0, depth), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernBulletMarker, value: String(marker), range: NSRange(location: 0, length: min(1, para.length)))
@@ -2544,13 +2551,13 @@ enum NativeMarkdownCodec {
         return out
     }
 
-    private static func makeImageAttachmentAttributed(alt: String, destination: String, sourceMarkdown: String, baseFont: NSFont) -> NSAttributedString {
+    private static func makeImageAttachmentAttributed(alt: String, destination: String, sourceMarkdown: String, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
         let attachment = MarkdownImageAttachment(
             altText: alt,
             destination: destination,
             sourceMarkdown: sourceMarkdown,
-            baseURL: activeImportBaseURL,
-            allowsRemoteLoading: activeImportOptions.remoteImageLoadingEnabled
+            baseURL: ctx.baseURL,
+            allowsRemoteLoading: ctx.options.remoteImageLoadingEnabled
         )
         let out = NSMutableAttributedString(attributedString: NSAttributedString(attachment: attachment))
         if out.length > 0 {
@@ -2852,7 +2859,7 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeOrderedParagraph(_ ordered: (index: Int, markerPadding: String, text: String), indent: Int, depth: Int, baseFont: NSFont) -> NSAttributedString {
+    private static func makeOrderedParagraph(_ ordered: (index: Int, markerPadding: String, text: String), indent: Int, depth: Int, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
         var markerAttrs = baseAttributes(baseFont: baseFont).merging(
@@ -2863,7 +2870,7 @@ enum NativeMarkdownCodec {
 
         let marker = orderedDisplayMarker(index: max(0, ordered.index), depth: depth)
         para.append(NSAttributedString(string: marker, attributes: markerAttrs))
-        let content = parseInline(ordered.text, baseFont: baseFont)
+        let content = parseInline(ordered.text, baseFont: baseFont, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
@@ -2936,7 +2943,8 @@ enum NativeMarkdownCodec {
         _ orderedTask: (index: Int, checked: Bool, text: String),
         indent: Int,
         depth: Int,
-        baseFont: NSFont
+        baseFont: NSFont,
+        ctx: ImportContext
     ) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
@@ -2959,7 +2967,7 @@ enum NativeMarkdownCodec {
         para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
         para.append(NSAttributedString(string: " ", attributes: markerAttrs))
 
-        let content = parseInline(orderedTask.text, baseFont: baseFont)
+        let content = parseInline(orderedTask.text, baseFont: baseFont, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
@@ -3113,8 +3121,8 @@ enum NativeMarkdownCodec {
         var linkReferenceURL: String? = nil
     }
 
-    private static func parseInline(_ text: String, baseFont: NSFont) -> NSAttributedString {
-        parseInline(text, baseFont: baseFont, style: InlineStyle())
+    private static func parseInline(_ text: String, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
+        parseInline(text, baseFont: baseFont, style: InlineStyle(), ctx: ctx)
     }
 
     private static func parseAutolinkURL(_ inner: String) -> URL? {
@@ -3144,8 +3152,8 @@ enum NativeMarkdownCodec {
         let nextIndex: Int
     }
 
-    private static func parseInline(_ text: String, baseFont: NSFont, style: InlineStyle) -> NSAttributedString {
-        if activeStrictConformanceRoundTripMode {
+    private static func parseInline(_ text: String, baseFont: NSFont, style: InlineStyle, ctx: ImportContext) -> NSAttributedString {
+        if ctx.strictConformanceRoundTripMode {
             let attr = NSMutableAttributedString(attributedString: makeInlineAttributed(text, baseFont: baseFont, style: style))
             if attr.length > 0 {
                 attr.addAttribute(.kernSourceMarkdown, value: text, range: NSRange(location: 0, length: attr.length))
@@ -3177,7 +3185,7 @@ enum NativeMarkdownCodec {
         }
 
         func appendImageAttachment(alt: String, destination: String, sourceMarkdown: String) {
-            out.append(makeImageAttachmentAttributed(alt: alt, destination: destination, sourceMarkdown: sourceMarkdown, baseFont: baseFont))
+            out.append(makeImageAttachmentAttributed(alt: alt, destination: destination, sourceMarkdown: sourceMarkdown, baseFont: baseFont, ctx: ctx))
         }
 
         while i < chars.count {
@@ -3197,7 +3205,7 @@ enum NativeMarkdownCodec {
 
             // Images: ![alt](url "title") / ![alt][id]
             if ch == "!", i + 1 < chars.count, chars[i + 1] == "[" {
-                if let image = parseImage(chars, startIndex: i) {
+                if let image = parseImage(chars, startIndex: i, ctx: ctx) {
                     appendImageAttachment(alt: image.alt, destination: image.destination, sourceMarkdown: image.sourceMarkdown)
                     i = image.nextIndex
                     continue
@@ -3221,7 +3229,7 @@ enum NativeMarkdownCodec {
 
             // Link: [text](url "title") / [text][id]
             if ch == "[" {
-                if let link = parseLink(chars, startIndex: i, parentStyle: style, baseFont: baseFont) {
+                if let link = parseLink(chars, startIndex: i, parentStyle: style, baseFont: baseFont, ctx: ctx) {
                     out.append(link.attributed)
                     i = link.nextIndex
                     continue
@@ -3284,7 +3292,7 @@ enum NativeMarkdownCodec {
                     var nextStyle = style
                     nextStyle.strong.toggle()
                     nextStyle.emphasis.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle))
+                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
                     i = end + 3
                     continue
                 }
@@ -3301,7 +3309,7 @@ enum NativeMarkdownCodec {
                     }
                     var nextStyle = style
                     nextStyle.strike.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle))
+                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
                     i = end + 2
                     continue
                 }
@@ -3320,7 +3328,7 @@ enum NativeMarkdownCodec {
                     }
                     var nextStyle = style
                     nextStyle.strong.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle))
+                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
                     i = end + 2
                     continue
                 }
@@ -3339,7 +3347,7 @@ enum NativeMarkdownCodec {
                     }
                     var nextStyle = style
                     nextStyle.emphasis.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle))
+                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
                     i = end + 1
                     continue
                 }
@@ -3759,7 +3767,7 @@ enum NativeMarkdownCodec {
         return nil
     }
 
-    private static func parseImage(_ chars: [Character], startIndex: Int) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: Int)? {
+    private static func parseImage(_ chars: [Character], startIndex: Int, ctx: ImportContext) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: Int)? {
         guard startIndex + 1 < chars.count, chars[startIndex] == "!", chars[startIndex + 1] == "[" else { return nil }
         guard let alt = parseBracketContent(chars, openIndex: startIndex + 1) else { return nil }
 
@@ -3777,7 +3785,7 @@ enum NativeMarkdownCodec {
            let ref = parseBracketContent(chars, openIndex: alt.nextIndex)
         {
             let refID = ref.text.isEmpty ? alt.text : ref.text
-            if let def = activeReferenceDefinitions[refID.lowercased()] {
+            if let def = ctx.referenceDefinitions[refID.lowercased()] {
                 let source = "![\(alt.text)][\(refID)]"
                 return (alt.text, def.destination, source, ref.nextIndex)
             }
@@ -3786,7 +3794,7 @@ enum NativeMarkdownCodec {
         return nil
     }
 
-    private static func parseLink(_ chars: [Character], startIndex: Int, parentStyle: InlineStyle, baseFont: NSFont) -> InlineParseResult? {
+    private static func parseLink(_ chars: [Character], startIndex: Int, parentStyle: InlineStyle, baseFont: NSFont, ctx: ImportContext) -> InlineParseResult? {
         guard let linkText = parseBracketContent(chars, openIndex: startIndex) else { return nil }
         // Keep empty link labels literal to avoid dropping syntax during round-trip (`[](...)`).
         guard !linkText.text.isEmpty else { return nil }
@@ -3811,7 +3819,7 @@ enum NativeMarkdownCodec {
             linkStyle.linkTitle = target.title
             linkStyle.linkReferenceID = nil
             linkStyle.linkReferenceURL = nil
-            let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle))
+            let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle, ctx: ctx))
             if inner.length > 0 {
                 inner.addAttribute(.kernLinkDestination, value: target.destination, range: NSRange(location: 0, length: inner.length))
                 if let title = target.title {
@@ -3830,7 +3838,7 @@ enum NativeMarkdownCodec {
                 return makeSourceLiteralResult(chars: chars, startIndex: startIndex, nextIndex: literalEnd, baseFont: baseFont, style: parentStyle)
             }
             let refID = ref.text.isEmpty ? linkText.text : ref.text
-            if let definition = activeReferenceDefinitions[refID.lowercased()] {
+            if let definition = ctx.referenceDefinitions[refID.lowercased()] {
                 let resolvedDestination = unescapeMarkdownBackslashes(definition.destination)
                 guard let url = normalizedLinkURL(from: resolvedDestination) else { return nil }
                 var linkStyle = parentStyle
@@ -3841,7 +3849,7 @@ enum NativeMarkdownCodec {
                 linkStyle.linkReferenceID = definition.id
                 linkStyle.linkReferenceURL = definition.destination
 
-                let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle))
+                let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle, ctx: ctx))
                 if inner.length > 0 {
                     inner.addAttribute(.kernLinkReferenceID, value: definition.id, range: NSRange(location: 0, length: inner.length))
                     inner.addAttribute(.kernLinkReferenceURL, value: definition.destination, range: NSRange(location: 0, length: inner.length))
@@ -4511,8 +4519,8 @@ enum NativeMarkdownCodec {
         case tab
     }
 
-    private static func stripHardBreakMarker(_ text: String) -> (text: String, hardBreak: HardBreakMarker?) {
-        if activeStrictConformanceRoundTripMode {
+    private static func stripHardBreakMarker(_ text: String, ctx: ImportContext) -> (text: String, hardBreak: HardBreakMarker?) {
+        if ctx.strictConformanceRoundTripMode {
             return (text, nil)
         }
         let backtickCount = text.filter { $0 == "`" }.count
