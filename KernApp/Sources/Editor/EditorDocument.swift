@@ -27,14 +27,31 @@ final class EditorDocument: NSDocument {
     // MARK: - Reading
 
     override func read(from data: Data, ofType typeName: String) throws {
-        guard let content = String(data: data, encoding: .utf8) else {
-            throw NSError(
-                domain: NSOSStatusErrorDomain,
-                code: unimpErr,
-                userInfo: [NSLocalizedDescriptionKey: "Unable to read file as UTF-8 text"]
-            )
+        // Try UTF-8 first (the common case).
+        if let content = String(data: data, encoding: .utf8) {
+            stringValue = content
+            return
         }
-        stringValue = content
+        // Check for UTF-16 BOM before trying lossy single-byte encodings.
+        if data.count >= 2 {
+            let bom = (data[data.startIndex], data[data.startIndex + 1])
+            if bom == (0xFF, 0xFE) || bom == (0xFE, 0xFF) {
+                if let content = String(data: data, encoding: .utf16) {
+                    stringValue = content
+                    return
+                }
+            }
+        }
+        // Fall back to common single-byte encodings (isoLatin1 covers all 0-255 byte values).
+        if let content = String(data: data, encoding: .isoLatin1) {
+            stringValue = content
+            return
+        }
+        throw NSError(
+            domain: NSOSStatusErrorDomain,
+            code: unimpErr,
+            userInfo: [NSLocalizedDescriptionKey: "Unable to read file as text (tried UTF-8 and auto-detection)"]
+        )
     }
 
     // MARK: - Writing

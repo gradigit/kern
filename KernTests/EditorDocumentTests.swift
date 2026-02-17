@@ -34,12 +34,26 @@ final class EditorDocumentTests: XCTestCase {
         XCTAssertEqual(doc.stringValue, content)
     }
 
-    func testReadInvalidUTF8Throws() {
+    func testReadUTF16BOMFallback() throws {
         let doc = EditorDocument()
-        // Create invalid UTF-8 bytes
-        let data = Data([0xFF, 0xFE, 0x80, 0x81])
+        // UTF-16LE BOM (FF FE) followed by "Hi" in UTF-16LE
+        let content = "Hi"
+        let data = content.data(using: .utf16LittleEndian)!
+        let bom = Data([0xFF, 0xFE])
+        let bomData = bom + data
 
-        XCTAssertThrowsError(try doc.read(from: data, ofType: "net.daringfireball.markdown"))
+        try doc.read(from: bomData, ofType: "net.daringfireball.markdown")
+        XCTAssertEqual(doc.stringValue, content)
+    }
+
+    func testReadLatin1Fallback() throws {
+        let doc = EditorDocument()
+        // Latin-1 encoded string with non-UTF-8 byte (0xE9 = é in Latin-1)
+        let data = Data([0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0xE9])  // "Hello é"
+
+        try doc.read(from: data, ofType: "net.daringfireball.markdown")
+        // Should decode via auto-detection
+        XCTAssertTrue(doc.stringValue.contains("Hello"))
     }
 
     // MARK: - Write
