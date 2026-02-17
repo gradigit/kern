@@ -5,6 +5,7 @@ This is the canonical inventory of the native (no WebView) editor test suite: wh
 Defaults (per your prefs):
 - Export dialect default: `gfm`
 - Kern extensions: optional settings (still tested)
+- Strict spec conformance lane: runs with Kern extensions disabled (`orderedTasksEnabled=0`, `headingCheckboxesEnabled=0`)
 - Ordered list numbering default: `gfmDefault` (sequential normalization), optional `preserveTyped`
 - Shift+Enter: line break inside the same block/list item (Notion/GitHub-style)
 
@@ -13,6 +14,7 @@ Defaults (per your prefs):
 - Golden fixtures (import -> attributed -> export): `KernTests/NativeEditorGoldenFixturesTests.swift`
 - Unit option/attribute specs: `KernTests/NativeMarkdownCodec*Tests.swift`
 - Full-spec case matrix (250+ generator-backed cases, expected-to-fail until implemented): `KernTests/NativeMarkdownCodecFullSpecCaseMatrixTests.swift`
+- Strict Markdown spec conformance (official corpora; Kern extensions explicitly separated): `KernTests/NativeMarkdownSpecConformanceTests.swift`
 - UI E2E (menus, clicking, typing, screenshots): `KernUITests/NativeEditorE2ETests.swift`
 - Visual regression (optional): `KernTests/NativeEditorSnapshotTests.swift`
 
@@ -26,6 +28,7 @@ Smoke / always-on (fast correctness for supported subset):
 - `KernTests/NativeEditorGoldenFixturesTests.swift` (fixture-driven round-trip)
 - `KernTests/NativeMarkdownCodecIdempotencyTests.swift` (property-style stability across option permutations)
 - `KernTests/NativeFindEngineTests.swift` (native find/replace engine)
+- `KernTests/NativeFindReplaceIntegrationTests.swift` (find/replace UI wiring + behavior; no Accessibility needed)
 - `KernTests/EditorDocumentTests.swift` (document/file IO)
 - `KernTests/AnchorNavigationTests.swift` (in-document `#anchor` click/jump behavior)
 - `KernTests/StressFixturesSanityTests.swift` (fixtures contain required feature sections + local assets exist)
@@ -36,8 +39,11 @@ Exhaustive / expected-to-fail until full spec is implemented:
 - `KernTests/NativeMarkdownCodecGfmMarkerCompatibilityTests.swift` (marker compatibility + in-doc anchor links)
 - `KernTests/NativeMarkdownCodecFuzzTests.swift` (deterministic fuzz; generator-backed)
 - `KernTests/NativeEditorStressFixtureFullSpecTests.swift` (integration spec: stress-test.md must import as WYSIWYG + export stable)
+- `KernTests/NativeEditorMegaStressTypingMatrixTests.swift` (live typing: full mega char-by-char + ultimate permutation matrix + mega all-profile matrix [gated] + interleaved action programs + action permutations)
 - `KernTests/NativeEditorCheckboxLayoutMetricSpecTests.swift` (pixel-level checkbox alignment + sizing)
+- `KernTests/NativeEditorMarkerAlignmentMetricSpecTests.swift` (pixel-level marker alignment: bullets + ordered + bulleted-tasks)
 - `KernTests/NativeEditorCodeBlockChromeSpecTests.swift` (code block chrome: language label, syntax highlight, copied feedback, placement)
+- `KernTests/NativeMarkdownSpecConformanceTests.swift` (official CommonMark + cmark-gfm fixtures, semantic HTML oracle via `cmarkgfm`; strict profile disables Kern extensions)
 
 Snapshots (visual regression; gated):
 - `KernTests/NativeEditorSnapshotTests.swift` (AppKit view snapshots; record + verify modes)
@@ -45,7 +51,7 @@ Snapshots (visual regression; gated):
 Perf / benchmarks (gated behind `KERN_ENABLE_PERF_TESTS=1`):
 - `KernTests/NativeMarkdownCodecPerformanceTests.swift` (import/export perf on benchmark fixture)
 - `KernTests/NativeEditorRenderPerformanceTests.swift` (render/layout perf on benchmark fixture)
-- `KernTests/NativeEditorMegaStressPerformanceTests.swift` (mega-stress render/scroll + incremental typing perf)
+- `KernTests/NativeEditorMegaStressPerformanceTests.swift` (stress/ultimate/mega render + mega scroll + incremental typing + ultimate/mega char-by-char + ultimate/mega interleaved action bursts)
 
 UI E2E (interaction; screenshots always attached by default):
 - `KernUITests/NativeEditorE2ETests.swift`
@@ -81,11 +87,12 @@ Preferences are controlled via:
 | Tables (GFM) | `| a | b |` imports as real table (borders + alignment); export canonical table markdown | `tables.*` fixture | `testTypedTableConvertsAndExportsGfmTable`, `testOpenFileWithGfmTableRendersWysiwygAndExportsStable` (+ matrix includes table round-trip) | Rendered via TextKit `NSTextTableBlock` |
 | File reload on disk change | External write triggers reload + toast; editor updates content | (N/A) | `testReloadOnDiskChangeShowsToastAndUpdatesContent` | Toast is labeled `NativeEditor.ReloadToast` for UI assertions |
 | In-document anchors | Clicking `[Text](#anchor)` jumps within the document (no OSStatus errors) | `AnchorNavigationTests` | (optional; UI later) | Jump toast uses `NativeEditor.JumpToast` |
-| Find / Replace | Find bar is native + testable; replace mutates document deterministically | (N/A) | `testFindReplaceReplacesMatchesInOrder` | Find UI is `NativeEditor.FindBar` (no system Find panel dependency) |
+| Find / Replace | Find bar is native + testable; replace mutates document deterministically | `NativeFindEngineTests`, `NativeFindReplaceIntegrationTests` | `testFindReplaceReplacesMatchesInOrder` | Find UI is `NativeEditor.FindBar` (no system Find panel dependency) |
 | Checkbox click hit-target | Clicking checkbox glyph toggles; optional marker-region toggles | options tests | `testCheckboxHitTargetGlyphTogglesByClick` (gated), `testCheckboxHitTargetMarkerTogglesWhenEnabled` (gated) | Coordinate-based clicks can be flaky; gated behind exhaustive UI |
 | Visual regression | Stable rendering across changes | Snapshot tests (gated) | UI screenshots attached always | Enable with `./scripts/test-native-editor.sh --unit-only --snapshots` |
 | Full Markdown features (full spec) | Blockquotes, HR, images, strikethrough, autolinks, nested lists, math, mermaid, etc. | `NativeMarkdownCodecFullSpecCaseMatrixTests` + `NativeMarkdownCodecFutureSpecTests` (gated + expected-failure) | None yet | Enable with `./scripts/test-native-editor.sh --unit-only --exhaustive` |
 | Stress fixture (full spec) | `stress-test.md` must import as true WYSIWYG + export stable | `NativeEditorStressFixtureFullSpecTests` (gated + expected-failure) | None yet | Ensures "ultimate" fixture actually drives development |
+| Live typing permutation matrix | Character-by-character typing + action permutations across preference combinations | `NativeEditorMegaStressTypingMatrixTests` (gated; non-UI) | `testScenarioMatrix_ExhaustiveUI_FullFixtureLiveTypingAndActionPermutations` (gated, char-by-char default) | Non-UI matrix is the primary exhaustive engine loop; UI run validates end-to-end live typing on the full mega fixture |
 
 ## Known Gaps (Missing Tests / Not Yet Implemented)
 
@@ -104,11 +111,18 @@ These are called out in `docs/plans/native-editor-test-suite.md` and should grad
 ## Running
 
 - Full unit suite (includes golden fixtures): `./scripts/test-native-editor.sh --unit-only`
+- Strict spec conformance lane (official CommonMark + GFM fixtures):
+  - `./scripts/test-markdown-spec-conformance.sh`
+  - optional bounds: `--mode commonmark|gfm|all`, `--limit N`, `--section-regex REGEX`
+- Full orchestrated exhaustive + benchmark run:
+  - `./scripts/run-exhaustive-native-suite.sh`
 - Full UI suite: `./scripts/test-native-editor.sh --ui-only`
   - Default screenshot mode: keep on success (for visual review)
   - Faster modes:
     - `KERN_UI_SCREENSHOTS=failure` (keep only on failures)
     - `KERN_UI_SCREENSHOTS=off` (disable screenshots)
+  - If UI tests are skipped for missing Accessibility permissions:
+    - `./scripts/open-ui-test-permissions.sh` (builds the runner + opens System Settings panes)
   - Export attachments (pngs/logs) to disk:
     - pass `--export-ui-attachments` or set `KERN_EXPORT_UI_ATTACHMENTS=1`
     - or run: `./scripts/export-xcresult-attachments.sh test-results/native-editor/<ts>/KernUI.xcresult`
@@ -116,6 +130,20 @@ These are called out in `docs/plans/native-editor-test-suite.md` and should grad
     - `test-results/native-editor/<ts>/ui-screenshots/` (via `KERN_UI_SCREENSHOT_DIR`)
   - Exhaustive UI matrix:
     - `./scripts/test-native-editor.sh --ui-only --exhaustive`
+    - `KERN_UI_ENABLE_LIVE_TYPING=1` to include the long full-fixture live-typing UI stress test
+    - Optional knobs:
+      - `KERN_UI_TYPING_FIXTURE=mega-stress-test.md|ultimate-stress-test.md`
+      - `KERN_UI_TYPING_MODE=character|chunked`
+      - `KERN_UI_TYPING_CHUNK_SIZE=1200`
+      - `KERN_UI_ACTION_DEPTH=1|2|3`
+      - `KERN_UI_ACTION_LIMIT=N` (unset = all generated programs)
+  - Ultra matrix mode (all-profile mega permutation run + shardable):
+    - `./scripts/test-native-editor.sh --unit-only --exhaustive --ultra`
+  - Ultra full mode (runs all profiles/programs in mega matrix; very slow):
+    - `./scripts/test-native-editor.sh --unit-only --exhaustive --ultra-full`
+    - Optional sharding:
+      - `KERN_EXHAUSTIVE_PROFILE_SHARD_COUNT=N`
+      - `KERN_EXHAUSTIVE_PROFILE_SHARD_INDEX=I`
 - Snapshots (optional):
   - `./scripts/test-native-editor.sh --unit-only --snapshots`
   - Record baselines (writes `KernTests/__Snapshots__/*`): `./scripts/test-native-editor.sh --unit-only --record-snapshots`

@@ -1,0 +1,48 @@
+# Markdown Spec Failure Tracker (Strict CommonMark/GFM)
+
+This file tracks strict Markdown spec conformance gaps for the native TextKit engine.
+
+Scope:
+- Strict profile only (no Kern extensions): `orderedTasksEnabled=false`, `headingCheckboxesEnabled=false`.
+- Sources:
+  - CommonMark: `commonmark-0.31.2.json`
+  - GFM: `gfm-0.29.0.gfm.13.json`
+
+## Latest Run
+
+- Timestamp: `2026-02-17 02:04:51`
+- Command:
+  - `./scripts/test-markdown-spec-conformance.sh`
+- Result bundle:
+  - `test-results/native-editor/20260217-020451/spec-conformance/KernMarkdownSpecConformance.xcresult`
+
+## Current Score
+
+| Mode | Passed | Total | Failed | Pass Rate |
+|---|---:|---:|---:|---:|
+| CommonMark | 652 | 652 | 0 | 100.00% |
+| GFM | 670 | 670 | 0 | 100.00% |
+
+## Status
+
+All strict conformance sections are currently `done` (no mismatches in this run).
+
+## Historical Baseline (for context)
+
+Previous failure baseline:
+- Timestamp: `2026-02-16 20:45:38`
+- Path: `test-results/native-editor/20260216-204538/spec-conformance`
+
+Previous score:
+- CommonMark: `491 / 652` (161 failed)
+- GFM: `508 / 670` (162 failed)
+
+## Tracking Workflow
+
+1. Run strict conformance:
+   - `./scripts/test-markdown-spec-conformance.sh`
+2. If failures appear, update this file with:
+   - failing sections,
+   - fail counts by mode,
+   - representative examples and artifact paths.
+3. Keep Kern-extension behavior tracked separately in option/profile tests (never counted as strict conformance).
