@@ -385,6 +385,9 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let baselineOffset = CheckboxStyle.baselineOffset(textFont: textFontForAlignment, checkboxFont: checkboxFont)
 
         let newChar = newChecked ? "\u{2611}" : "\u{2610}" // ☑ / ☐
+        storage.beginEditing()
+        defer { storage.endEditing() }
+
         storage.replaceCharacters(in: NSRange(location: characterIndex, length: 1), with: newChar)
 
         storage.addAttribute(.font, value: checkboxFont, range: NSRange(location: characterIndex, length: 1))
@@ -1457,6 +1460,9 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         guard safeLen > 0 else { return }
         let safeRange = NSRange(location: paraRange.location, length: safeLen)
 
+        storage.beginEditing()
+        defer { storage.endEditing() }
+
         storage.removeAttribute(.kernQuoteDepth, range: safeRange)
         let style = NSMutableParagraphStyle()
         style.paragraphSpacingBefore = 0
@@ -1512,6 +1518,9 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         // Determine if we're turning on or off based on the first character.
         let existing = (storage.attribute(key, at: range.location, effectiveRange: nil) as? Bool) ?? false
         let newValue = !existing
+
+        storage.beginEditing()
+        defer { storage.endEditing() }
 
         storage.addAttribute(key, value: newValue, range: range)
 
