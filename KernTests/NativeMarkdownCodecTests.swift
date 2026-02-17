@@ -76,4 +76,33 @@ final class NativeMarkdownCodecTests: XCTestCase {
 
         XCTAssertEqual(out.trimmingCharacters(in: .whitespacesAndNewlines), md)
     }
+
+    @MainActor
+    func testReferenceDefinitionInsideBlockquote() {
+        let md = """
+        > [id]: https://example.com "Title"
+        >
+        > Click [here][id].
+        """
+
+        let attr = NativeMarkdownCodec.importMarkdown(md)
+        let out = NativeMarkdownCodec.exportMarkdown(attr)
+
+        // The reference link should resolve — export should contain the actual URL
+        XCTAssertTrue(out.contains("https://example.com"), "Reference definition inside blockquote should resolve")
+    }
+
+    @MainActor
+    func testReferenceDefinitionInsideNestedBlockquote() {
+        let md = """
+        > > [nested]: https://nested.example.com
+        > >
+        > > See [nested].
+        """
+
+        let attr = NativeMarkdownCodec.importMarkdown(md)
+        let out = NativeMarkdownCodec.exportMarkdown(attr)
+
+        XCTAssertTrue(out.contains("https://nested.example.com"), "Reference definition inside nested blockquote should resolve")
+    }
 }

@@ -120,6 +120,16 @@ enum NativeMarkdownCodec {
         for raw in lines {
             if let def = parseReferenceDefinition(raw) {
                 referenceDefinitions[def.id.lowercased()] = def
+            } else {
+                // Strip blockquote prefixes and retry — reference definitions inside
+                // blockquotes are still valid link targets per CommonMark spec.
+                var stripped = raw
+                while let q = parseBlockquotePrefix(stripped) {
+                    stripped = q.text
+                }
+                if stripped != raw, let def = parseReferenceDefinition(stripped) {
+                    referenceDefinitions[def.id.lowercased()] = def
+                }
             }
         }
         activeReferenceDefinitions = referenceDefinitions
