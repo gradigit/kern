@@ -1,161 +1,121 @@
-# HANDOFF — KernTextKit Is Now Primary Kern
+# HANDOFF — KernTextKit Session Snapshot (For Fresh Claude Code Agent)
 
-Last updated: 2026-02-17 15:50:00 KST
+Last updated: 2026-02-17 21:10:00 KST
 
-This is the only file a new agent needs to read first.
+## 1) Session Intent
 
-## 1) Canonical Repos And Roles
+User requested `$wrap` and asked for a fresh-agent-ready handoff that can be used directly by Claude Code.
 
-### Primary product repo (active development)
-- Path: `/Users/aaaaa/Projects/Kern-textkit`
+## 2) Wrap Chain Result
+
+Requested chain: `sync-docs -> claude-md-improver -> handoff`
+
+- `syncing-docs`: completed manually (docs drift fixed in owned docs)
+- `claude-md-improver`: missing on disk at `/Users/aaaaa/.claude/skills/claude-md-improver/SKILL.md`
+- `handoff`: completed (this file regenerated as full snapshot)
+
+## 3) Repo Snapshot
+
+- Repo path: `/Users/aaaaa/Projects/Kern-textkit`
 - Branch: `main`
-- Product: native TextKit app (no WebView)
-- Primary app identity: `Kern` (bundle id `com.gradigit.kern`)
+- HEAD commit: `62b220a`
+- Working tree state at handoff time:
+  - modified: `77`
+  - untracked: `73`
+  - total changed: `150`
+- No commit was created during this wrap pass.
 
-### Legacy archive repo (WebKit/CoreEditor)
-- Path: `/Users/aaaaa/Projects/Kern-webkit`
-- Branch checked out: `rewrite`
-- Branch divergence vs `main`: none (`main` and `rewrite` both at `a909792`)
-- Archive marker tag: `archive-kern-webkit-2026-02-17`
-- Active legacy worktree path:
-  - `/Users/aaaaa/Projects/Kern-webkit-worktrees/walkthree`
+Why no commit here: branch is already in a very large active WIP state, and auto-committing the entire tree in this wrap would bundle broad in-flight work without review boundaries.
 
-## 2) Mandatory Read Order (Fresh Agent)
+## 4) What Was Done In This Session
 
-1. `HANDOFF.md` (this file)
-2. `AGENTS.md`
-3. `docs/plans/native-editor-test-suite.md`
-4. `docs/plans/markdown-spec-failure-tracker.md`
-5. `docs/plans/native-editor-missing-features-implementation-plan.md`
-6. `NATIVE-EDITOR-TEST-MATRIX.md`
+### A) Memory-leak investigation (TextKit app)
 
-## 3) Promotion Changes Completed In This Session
+User concern: `kern://editor` looked memory-heavy.
 
-1. Legacy repo directory switched from `Kern` to `Kern-webkit`.
-2. Legacy archive decision made:
-   - keep (do not merge into TextKit; no unique commit divergence on `rewrite`).
-3. Legacy `walkthree` git worktree moved to stable path:
-   - `/Users/aaaaa/Projects/Kern-webkit-worktrees/walkthree`
-   - this removed dependency on `/Users/aaaaa/Projects/Kern` alias.
-4. TextKit app installed as:
-   - `/Users/aaaaa/Applications/Kern.app`
-5. Legacy WebKit app preserved as:
-   - `/Users/aaaaa/Applications/Kern-webkit.app`
-6. Markdown default app association set to TextKit:
-   - `duti -s com.gradigit.kern net.daringfireball.markdown all`
-7. Launch behavior verified:
-   - `open -a Kern <file.md>` opens `/Users/aaaaa/Applications/Kern.app`
-   - `open <file.md>` opens `/Users/aaaaa/Applications/Kern.app`
-   - `open -a Kern-webkit <file.md>` opens `/Users/aaaaa/Applications/Kern-webkit.app`
-8. Current compatibility symlink target:
-   - `/Users/aaaaa/Projects/Kern -> /Users/aaaaa/Projects/Kern-textkit`
+Findings:
+1. `kern://editor` is legacy WebKit route, not TextKit.
+2. TextKit memory checks did not show leak behavior in soak runs.
+3. `leaks <pid>` reported `0 leaks for 0 total leaked bytes` in tested runs.
 
-## 4) Current Critical Commands
+Representative TextKit soak results:
+- Baseline (mega fixture): ~`154.2 MB` RSS
+- After opening 55 tabs: ~`414.7 MB` RSS
+- Sampling window: stabilized around ~`411.6–416.9 MB` (no monotonic creep)
+- `leaks` summary (same run): 0 leaked bytes
 
-Run from:
-- `/Users/aaaaa/Projects/Kern-textkit`
+### B) Defensive memory hardening implemented
 
-Build:
-```bash
-xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit -configuration Debug -destination 'platform=macOS' build
-```
+A bounded image cache policy was added in:
+- `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
 
-Open app (primary Kern):
-```bash
-open -a Kern test-fixtures/stress-test.md
-```
+Changes:
+- Added `NSCache` cap:
+  - `totalCostLimit = 128 * 1024 * 1024` (128MB)
+  - `countLimit = 256`
+- Added cost-based insertions for cached images.
+- Added `estimatedImageCostBytes(_:)` helper for approximate decoded bitmap memory cost.
 
-Open app (legacy WebKit archive):
-```bash
-open -a Kern-webkit test-fixtures/stress-test.md
-```
+### C) Verification executed
 
-Fast tests:
-```bash
-./scripts/test-native-editor.sh --unit-only
-```
+Command run:
+- `xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit -destination 'platform=macOS' -only-testing:KernTextKitTests/NativeEditorUltimateOpenRegressionTests test`
 
-Exhaustive tests:
-```bash
-./scripts/test-native-editor.sh --unit-only --exhaustive
-./scripts/test-native-editor.sh --unit-only --snapshots --exhaustive
-./scripts/test-native-editor.sh --ui-only --exhaustive
-```
+Result:
+- Test succeeded (`1 passed, 0 failed`).
 
-Full orchestrated gate:
-```bash
-./scripts/run-exhaustive-native-suite.sh
-```
+## 5) Docs Updated During Wrap
 
-## 5) App Association Verification Commands
+Owned docs updated:
+- `CLAUDE.md` (drift fixed, current native paths/commands, memory/cache learnings added)
+- `.doc-manifest.yaml` (stale WebKit-era references removed, timestamps and doc inventory refreshed)
+- `HANDOFF.md` (this full rewrite)
 
-```bash
-duti -x md
-open -a Kern /Users/aaaaa/Projects/Kern-textkit/test-fixtures/stress-test.md
-open /Users/aaaaa/Projects/Kern-textkit/test-fixtures/stress-test.md
-open -a Kern-webkit /Users/aaaaa/Projects/Kern-textkit/test-fixtures/stress-test.md
-```
+## 6) Cross-File Consistency Notes (Flagged)
 
-Expected:
-- `duti -x md` points to `/Users/aaaaa/Applications/Kern.app` and `com.gradigit.kern`.
+Watched doc mismatches still present and should be reviewed by next agent:
+1. `TODO.md` still contains older identity assumptions (for example bundle-id wording) that may not match current app identity/config.
+2. Existing branch has extensive WIP across tests/snapshots/scripts; new agent should treat current state as in-progress, not as a clean baseline.
 
-## 6) Test/Fixture Assets (Primary)
+## 7) First Steps For Fresh Agent (Do In Order)
 
-- Exhaustive typed fixture:
-  - `test-fixtures/ultimate-stress-test.md`
-- Volume/permutation fixture:
-  - `test-fixtures/mega-stress-test.md`
-- Generator:
-  - `scripts/gen_ultimate_stress_test.py`
-- Permutation appendix sync:
-  - `scripts/sync_mega_permutation_appendix.py`
+1. Read:
+   - `AGENTS.md`
+   - `HANDOFF.md` (this file)
+   - `CLAUDE.md`
+2. Validate repo state:
+   - `git status --short`
+   - `git rev-parse --short HEAD`
+3. Reconfirm key plan docs:
+   - `docs/plans/native-editor-test-suite.md`
+   - `docs/plans/markdown-spec-failure-tracker.md`
+   - `docs/plans/native-editor-missing-features-implementation-plan.md`
+4. Validate current native-editor baseline quickly:
+   - `./scripts/test-native-editor.sh --unit-only`
+5. If touching memory/image behavior, start from:
+   - `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
 
-## 7) Priority Functional Areas (Continue From Here)
+## 8) Key Files For Continuation
 
-- Task permutations and GFM/Kern profile behavior
-- Ordered task numbering semantics
-- Heading checkbox extension behavior
-- Code block chrome + copy/language interactions
-- Image attachments (local/remote/broken)
-- Mermaid rendering quality/layout
-- Math block/inline rendering
-- Anchor navigation behavior
-- Find/replace overlay non-obstruction
-- Exhaustive typing behavior (real keystroke newline/exit rules)
+- `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
+  - bounded cache + cost accounting changes are here
+- `KernApp/Sources/Editor/NativeEditorViewController.swift`
+  - core editor lifecycle and layout behavior
+- `KernTests/NativeEditorUltimateOpenRegressionTests.swift`
+  - regression guard used for targeted validation
+- `scripts/test-native-editor.sh`
+  - canonical test runner
+- `docs/plans/native-editor-test-suite.md`
+  - test suite source of truth
 
-## 8) Wrap Skill Note
+## 9) Recommended Immediate Next Actions
 
-Requested wrap chain was: sync-docs -> claude-md-improver -> handoff.
+1. Run `./scripts/test-native-editor.sh --unit-only` and capture current failures (if any).
+2. Decide commit strategy with user before staging the 150-file WIP tree.
+3. If memory still feels high in real usage, add an integration test that repeatedly opens image-heavy fixtures and asserts RSS stabilization trend (non-leak guard).
 
-- `syncing-docs` exists.
-- `handoff` exists.
-- `claude-md-improver` was missing at:
-  - `/Users/aaaaa/.claude/skills/claude-md-improver/SKILL.md`
+## 10) Safety Notes
 
-Fallback used:
-- comprehensive `HANDOFF.md` rewrite (this file) with exact state and continuation instructions.
+- Do not use destructive git commands on this branch (`reset --hard`, blanket checkout) because active WIP is intentionally present.
+- Do not modify legacy repo unless explicitly asked (`/Users/aaaaa/Projects/Kern-webkit`).
 
-## 9) Safety And Rollback
-
-No destructive repo history operations were used.
-
-Rollback options:
-1. Use legacy app directly:
-   - `open -a Kern-webkit <file.md>`
-2. If you must restore old path naming:
-   - move `/Users/aaaaa/Projects/Kern-webkit` back to `/Users/aaaaa/Projects/Kern` and remove symlink.
-3. Re-point markdown association back to legacy (if needed):
-   - `duti -s com.gradigit.kern.webkit net.daringfireball.markdown all`
-
-## 10) Completion Checklist For This Migration
-
-- [x] Single-file handoff prepared for fresh agent
-- [x] Legacy `rewrite` branch evaluated
-- [x] Legacy repo preserved under `Kern-webkit`
-- [x] Legacy worktree moved off `/Users/aaaaa/Projects/Kern` alias path
-- [x] TextKit promoted as default `Kern` app for open commands
-- [x] Markdown default association moved to TextKit
-- [x] Legacy WebKit app remains available as explicit option (`Kern-webkit`)
-
-Detailed migration report:
-- `docs/legacy/repo-promotion-report-2026-02-17.md`
