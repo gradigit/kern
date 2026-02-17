@@ -78,6 +78,7 @@ Strict markdown conformance:
   - `NSCache.totalCostLimit = 128MB`
   - `NSCache.countLimit = 256`
   - `setObject(..., cost: estimatedImageCostBytes(...))`
+- Packaging script avoids broad `rm -rf` patterns; use guarded directory deletion helper in `scripts/package-kern-app.sh`.
 
 ## Swift 6 Concurrency Notes
 
@@ -88,4 +89,4 @@ Strict markdown conformance:
 
 - Prefer fixing behavior via the native codec and attributed-text model, not markdown string hacks.
 - Keep defaults fast and deterministic; gate optional behavior via preferences/env flags.
-- Do not discard unrelated local changes in this repo; this branch is intentionally in active WIP state.
+- Always check `git status --short` before starting to avoid mixing unrelated edits.

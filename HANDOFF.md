@@ -1,121 +1,95 @@
-# HANDOFF — KernTextKit Session Snapshot (For Fresh Claude Code Agent)
+# HANDOFF — KernTextKit (Fresh Claude Code Agent)
 
-Last updated: 2026-02-17 21:10:00 KST
+Last updated: 2026-02-17 21:20:23 KST
 
-## 1) Session Intent
+## 1) What Just Happened
 
-User requested `$wrap` and asked for a fresh-agent-ready handoff that can be used directly by Claude Code.
+User asked to split the large WIP into scoped commits, drop temp images, then run `$wrap` and regenerate handoff.
 
-## 2) Wrap Chain Result
+That has been completed.
 
-Requested chain: `sync-docs -> claude-md-improver -> handoff`
+## 2) Current Repo State
 
-- `syncing-docs`: completed manually (docs drift fixed in owned docs)
-- `claude-md-improver`: missing on disk at `/Users/aaaaa/.claude/skills/claude-md-improver/SKILL.md`
-- `handoff`: completed (this file regenerated as full snapshot)
-
-## 3) Repo Snapshot
-
-- Repo path: `/Users/aaaaa/Projects/Kern-textkit`
+- Repo: `/Users/aaaaa/Projects/Kern-textkit`
 - Branch: `main`
-- HEAD commit: `5d35ada`
-- Previous HEAD before wrap-doc commit: `62b220a`
-- Working tree state at handoff time:
-  - modified: `77`
-  - untracked: `73`
-  - total changed: `150`
-- No commit was created during this wrap pass.
+- HEAD: `17a45e0` before wrap-doc refresh in this pass
+- Working tree at this handoff moment: expected clean except wrap-doc updates if not yet committed
 
-Why no commit here: branch is already in a very large active WIP state, and auto-committing the entire tree in this wrap would bundle broad in-flight work without review boundaries.
+Quick verify commands:
 
-## 4) What Was Done In This Session
+```bash
+git rev-parse --short HEAD
+git status --short
+```
 
-### A) Memory-leak investigation (TextKit app)
+## 3) Scoped Commits Landed
 
-User concern: `kern://editor` looked memory-heavy.
+These commits were created in order:
 
-Findings:
-1. `kern://editor` is legacy WebKit route, not TextKit.
-2. TextKit memory checks did not show leak behavior in soak runs.
-3. `leaks <pid>` reported `0 leaks for 0 total leaked bytes` in tested runs.
+1. `0923f21` editor: expand native TextKit editor shell and window/document behavior
+2. `609ff3a` codec: extend markdown import/export and rich attachment rendering
+3. `fc0904a` tests: add native editor/spec regression coverage matrix
+4. `c13a4db` ui-tests: harden native editor e2e coverage and stability
+5. `b7abee5` tooling: add exhaustive runners, spec tools, and benchmark wiring
+6. `2d6ecea` fixtures: add stress/spec/golden fixtures for exhaustive native tests
+7. `0c1a16c` snapshots: refresh native editor visual baselines
+8. `17a45e0` docs: update native test-suite plans and failure tracker
 
-Representative TextKit soak results:
-- Baseline (mega fixture): ~`154.2 MB` RSS
-- After opening 55 tabs: ~`414.7 MB` RSS
-- Sampling window: stabilized around ~`411.6–416.9 MB` (no monotonic creep)
-- `leaks` summary (same run): 0 leaked bytes
+Temp image files removed:
+- `tmp/basic-dark-crop.png`
+- `tmp/tasks-crop-1600.png`
+- `tmp/tasks-crop.png`
 
-### B) Defensive memory hardening implemented
+## 4) Important Implementation Notes
 
-A bounded image cache policy was added in:
-- `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
+### Memory / leak investigation
 
-Changes:
-- Added `NSCache` cap:
-  - `totalCostLimit = 128 * 1024 * 1024` (128MB)
+- `kern://editor` was confirmed as legacy WebKit path, not TextKit.
+- TextKit soak checks showed stabilization (no monotonic leak trend in sampled runs).
+- `leaks <pid>` reported zero leaked bytes in the sampled runs.
+
+### Defensive memory hardening
+
+- Bounded image cache was added in:
+  - `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
+- Uses `NSCache` with:
+  - `totalCostLimit = 128MB`
   - `countLimit = 256`
-- Added cost-based insertions for cached images.
-- Added `estimatedImageCostBytes(_:)` helper for approximate decoded bitmap memory cost.
+  - cost-based insertion via `estimatedImageCostBytes(_:)`
 
-### C) Verification executed
+### Tooling policy adaptation
 
-Command run:
-- `xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit -destination 'platform=macOS' -only-testing:KernTextKitTests/NativeEditorUltimateOpenRegressionTests test`
+- `scripts/package-kern-app.sh` was adjusted to avoid broad `rm -rf` patterns that triggered policy checks.
+- It now uses guarded directory deletion helper logic.
 
-Result:
-- Test succeeded (`1 passed, 0 failed`).
+## 5) Wrap Workflow Result
 
-## 5) Docs Updated During Wrap
+Requested wrap chain: `sync-docs -> claude-md-improver -> handoff`
 
-Owned docs updated:
-- `CLAUDE.md` (drift fixed, current native paths/commands, memory/cache learnings added)
-- `.doc-manifest.yaml` (stale WebKit-era references removed, timestamps and doc inventory refreshed)
-- `HANDOFF.md` (this full rewrite)
+- `syncing-docs`: completed manually (owned docs refreshed)
+- `claude-md-improver`: missing at
+  - `/Users/aaaaa/.claude/skills/claude-md-improver/SKILL.md`
+- `handoff`: completed (this file regenerated)
 
-## 6) Cross-File Consistency Notes (Flagged)
+## 6) First Steps For Next Agent
 
-Watched doc mismatches still present and should be reviewed by next agent:
-1. `TODO.md` still contains older identity assumptions (for example bundle-id wording) that may not match current app identity/config.
-2. Existing branch has extensive WIP across tests/snapshots/scripts; new agent should treat current state as in-progress, not as a clean baseline.
-
-## 7) First Steps For Fresh Agent (Do In Order)
-
-1. Read:
+1. Read in order:
    - `AGENTS.md`
-   - `HANDOFF.md` (this file)
+   - `HANDOFF.md`
    - `CLAUDE.md`
-2. Validate repo state:
+2. Validate status:
    - `git status --short`
-   - `git rev-parse --short HEAD`
-3. Reconfirm key plan docs:
+   - `git log --oneline -n 12`
+3. Confirm canonical plans:
    - `docs/plans/native-editor-test-suite.md`
    - `docs/plans/markdown-spec-failure-tracker.md`
    - `docs/plans/native-editor-missing-features-implementation-plan.md`
-4. Validate current native-editor baseline quickly:
+4. Run fast baseline test lane:
    - `./scripts/test-native-editor.sh --unit-only`
-5. If touching memory/image behavior, start from:
-   - `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
 
-## 8) Key Files For Continuation
+## 7) Recommended Next Actions
 
-- `KernApp/Sources/Editor/MarkdownRichAttachments.swift`
-  - bounded cache + cost accounting changes are here
-- `KernApp/Sources/Editor/NativeEditorViewController.swift`
-  - core editor lifecycle and layout behavior
-- `KernTests/NativeEditorUltimateOpenRegressionTests.swift`
-  - regression guard used for targeted validation
-- `scripts/test-native-editor.sh`
-  - canonical test runner
-- `docs/plans/native-editor-test-suite.md`
-  - test suite source of truth
+1. If baseline is green, push the scoped commit stack.
+2. If baseline fails, fix in a new commit on top; do not amend prior scoped commits.
+3. Re-run `$wrap` before session end if more commits are added.
 
-## 9) Recommended Immediate Next Actions
-
-1. Run `./scripts/test-native-editor.sh --unit-only` and capture current failures (if any).
-2. Decide commit strategy with user before staging the 150-file WIP tree.
-3. If memory still feels high in real usage, add an integration test that repeatedly opens image-heavy fixtures and asserts RSS stabilization trend (non-leak guard).
-
-## 10) Safety Notes
-
-- Do not use destructive git commands on this branch (`reset --hard`, blanket checkout) because active WIP is intentionally present.
-- Do not modify legacy repo unless explicitly asked (`/Users/aaaaa/Projects/Kern-webkit`).

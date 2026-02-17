@@ -1,17 +1,17 @@
 # Documentation manifest for KernTextKit
 # Tracks docs, ownership intent, and primary code references
 
-last_synced: "2026-02-17T12:09:35Z"
+last_synced: "2026-02-17T12:20:23Z"
 
 files:
   - path: README.md
     type: readme
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Primary project overview and contributor entrypoint
 
   - path: CLAUDE.md
     type: project-instructions
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Session instructions and high-signal engineering context
     references:
       - KernApp/Sources/App/main.swift
@@ -23,10 +23,11 @@ files:
       - scripts/run-kern-native.sh
       - scripts/test-native-editor.sh
       - scripts/test-markdown-spec-conformance.sh
+      - scripts/package-kern-app.sh
 
   - path: HANDOFF.md
     type: session-handoff
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Fresh-agent continuation snapshot with current repo state and next actions
 
   - path: TODO.md
@@ -36,27 +37,27 @@ files:
 
   - path: NATIVE-EDITOR-TEST-MATRIX.md
     type: test-plan
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Matrix coverage and exhaustive lane planning for native editor behavior
 
   - path: docs/plans/native-editor-test-suite.md
     type: canonical-plan
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Source-of-truth definition for comprehensive native editor testing
 
   - path: docs/plans/markdown-spec-failure-tracker.md
     type: canonical-plan
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Spec-conformance gap tracker for CommonMark/GFM behavior
 
   - path: docs/plans/native-editor-missing-features-implementation-plan.md
     type: canonical-plan
-    last_updated: "2026-02-17T12:09:35Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Native editor missing-feature implementation backlog and sequencing
 
   - path: BENCHMARKS.md
     type: benchmark-guide
-    last_updated: "2026-02-16T04:53:00Z"
+    last_updated: "2026-02-17T12:20:23Z"
     description: Benchmark methodology and reproducibility notes for editor performance
 
   - path: KERN-MARKDOWN.md
