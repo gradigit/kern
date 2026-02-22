@@ -80,7 +80,7 @@ KERN_ENABLE_PERF_TESTS=1 xcodebuild test \
 
 ### Cross-Editor Comparison
 
-#### Phase 1: Shell script (window detection, ~50ms resolution)
+#### Phase 1: Stable wrapper entrypoint
 
 ```bash
 # All detected editors, 30 runs, warm
@@ -91,9 +91,12 @@ KERN_ENABLE_PERF_TESTS=1 xcodebuild test \
 
 # Fewer runs for quick comparison
 ./scripts/cross-editor-benchmark.sh --runs 5 --verbose
+
+# Optional: include durable-save probe (off by default for speed)
+./scripts/cross-editor-benchmark.sh --runs 10 --save-durable
 ```
 
-#### Phase 2: Swift CLI (ScreenCaptureKit, ~16ms resolution)
+#### Phase 2: Swift CLI core runner
 
 ```bash
 # Build once
@@ -101,6 +104,9 @@ cd scripts/kern-bench && swift build -c release && cd ../..
 
 # Run with all editors (default: 30 runs, shuffled order, 3 warmup)
 scripts/kern-bench/.build/release/kern-bench --all --verbose
+
+# Run suite
+scripts/kern-bench/.build/release/kern-bench --suite wow --all --verbose
 
 # Specific editor with JSON output
 scripts/kern-bench/.build/release/kern-bench --editor "TextEdit" --runs 30 --json results.json
@@ -115,7 +121,7 @@ sudo scripts/kern-bench/.build/release/kern-bench --all --cold --runs 30 --json 
 #### Phase 3: Regression Detection
 
 ```bash
-# Compare baseline vs latest (uses Mann-Whitney U for v3 JSON)
+# Compare baseline vs latest (supports v4 + legacy fallback)
 python3 scripts/bench-regression-check.py --baseline baseline.json --latest latest.json
 
 # Custom thresholds
@@ -131,11 +137,14 @@ python3 scripts/bench-regression-check.py --baseline baseline.json --latest late
 
 ### Measurement Protocol
 
-- **Default: 30 runs** per editor (minimum for reliable percentile estimates)
-- **3 warmup runs** (discarded, not counted)
+- **Suite defaults**: 30 measured runs + 3 warmup
+- **Core measured UX metrics**: `open_latency_ms`, `typing_latency_ms`, `save_ui_ack_latency_ms`, `quit_latency_ms`
+- **Durable-save probe** (`save_durable_latency_ms`) is opt-in via `--save-durable` (disabled by default for runtime stability/speed)
+- **Startup probes**: cold and warm startup sampled independently (not mixed into measured run mode)
 - **Interleaved editor order**: editors are shuffled each round to eliminate thermal ordering bias
-- **5-second cooldown** between editors within each round
+- **0ms inter-editor cooldown by default** (opt-in via `--inter-editor-delay-ms`)
 - **No outlier removal**: raw data is preserved; the slow tail IS the user experience
+- **Frame monitor probes are opt-in** (`--enable-frame-monitor`) to keep default suite runtime fast
 
 ### Reported Statistics
 
@@ -149,12 +158,14 @@ python3 scripts/bench-regression-check.py --baseline baseline.json --latest late
 
 Both Swift (kern-bench) and Python (shell script) use **R Type 7 linear interpolation** for percentiles, producing identical results.
 
-### Regression Detection (v3)
+### Regression Detection (v4)
 
 - **Primary test**: Mann-Whitney U (non-parametric, no distribution assumptions)
 - **Secondary**: Bootstrap 95% CI for difference in medians
 - **Regression gate**: `p < 0.05` AND `|median difference| > max(5%, 50ms)`
-- Requires v3 JSON with raw run data. Falls back to legacy threshold check for v1/v2.
+- Failure-rate deltas are compared per metric and can independently trigger regressions
+- Official/Partial policy downgrades are treated as regression signals
+- Uses threshold fallback for legacy/sparse reports while preserving min-absolute gate logic
 
 ### Environment Requirements
 
@@ -166,15 +177,18 @@ Before any benchmark run:
 - [ ] Do Not Disturb enabled
 - [ ] Wait 10+ minutes after boot
 - [ ] Same test file for all editors (committed to repo)
-- [ ] Screen Recording permission granted (for Phase 2 ScreenCaptureKit)
 
-## JSON Schema (v3)
+## JSON Schema (v4)
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "tool": "kern-bench",
   "timestamp": "2026-02-19T12:00:00Z",
+  "suite": "wow",
+  "run_classification": "official",
+  "run_quality": "complete",
+  "partial_reasons": [],
   "environment": {
     "chip": "Apple M4",
     "macos": "26.2",
@@ -182,9 +196,21 @@ Before any benchmark run:
     "power": "AC",
     "thermal_pct": 100,
     "thermal_pct_end": 100,
-    "screencapture_available": true
+    "screencapture_available": true,
+    "accessibility_available": true
+  },
+  "preflight": {
+    "thermal_at_start_ok": true,
+    "thermal_throughout_ok": true,
+    "roster_complete": true,
+    "screen_capture_permission_ok": true,
+    "accessibility_permission_ok": true,
+    "fixture_hash_recorded": true
   },
   "config": {
+    "suite": "wow",
+    "suite_intended_usage": "headline/synthetic comparison",
+    "roster_policy": "locked_roster_v1_official_claims_only",
     "file": "test-fixtures/cross-editor-benchmark.md",
     "file_bytes": 18432,
     "file_hash": "<sha256>",
@@ -199,6 +225,11 @@ Before any benchmark run:
       "architecture": "Native AppKit",
       "runs": [
         {
+          "run_quality": "complete",
+          "open_latency_ms": 322.5,
+          "typing_latency_ms": 11.5,
+          "save_ui_ack_latency_ms": 75.0,
+          "quit_latency_ms": 140.0,
           "window_visible_ms": 245.3,
           "first_paint_ms": 310.1,
           "render_stable_ms": 520.5,
@@ -234,17 +265,28 @@ Before any benchmark run:
 
 ## Cross-Editor Benchmark Suite
 
+### Suite Policy
+
+- **Single suite** (`--suite wow`): headline/synthetic comparison
+- `real_use` is accepted as a deprecated alias to `wow`
+- Lean cross-editor core path: startup/open, type, save UI ack, quit
+- Durable file-commit save probe is optional (`--save-durable`)
+- Locked roster v1 (Official eligibility): **Kern, VS Code, Zed, Sublime Text, TextEdit**
+- If any required roster editor or required metric is missing, run is classified **Partial**
+- README/social headline claims must use **Official** runs only
+- See execution hardening checklist: `architect/benchmark-v2-execution-checklist.md`
+
 ### Tools
 
 | Tool | Resolution | Metrics | Usage |
 | --- | --- | --- | --- |
-| `scripts/cross-editor-benchmark.sh` | ~50ms | Window visible, RSS, phys_footprint | Quick comparison, bash 3.2 compatible |
-| `scripts/kern-bench/` | ~16ms | Window visible, first paint, render stable, memory | Precise frame-level detection via ScreenCaptureKit |
+| `scripts/cross-editor-benchmark.sh` | wrapper | suite selection + classification output | Stable public entrypoint (delegates to kern-bench) |
+| `scripts/kern-bench/` | ~16ms + action probes | startup/open + type + save + quit + classification | Primary runner |
 | `scripts/bench-regression-check.py` | — | Mann-Whitney U, bootstrap CI | Compare baseline vs latest JSON |
 
 ### JSON Result History
 
-Store benchmark results in `benchmark-history/` for trend tracking. Only v3 JSON is supported for regression detection with Mann-Whitney U.
+Store benchmark results in `benchmark-history/` for trend tracking. v4 is the canonical schema; legacy reports remain readable via fallback paths.
 
 ### Test Files
 
