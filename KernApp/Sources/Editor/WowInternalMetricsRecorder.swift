@@ -20,6 +20,9 @@ final class WowInternalMetricsRecorder {
     private var metrics: [String: Double] = [:]
     private var failureReasons: [String: String] = [:]
     private var metricSamples: [String: [Double]] = [:]
+    private var pendingPersistWorkItem: DispatchWorkItem?
+    private var lastPersistUptime: TimeInterval = 0
+    private let persistCoalesceSeconds: TimeInterval = 0.08
 
     private init() {}
 
@@ -33,11 +36,13 @@ final class WowInternalMetricsRecorder {
 
     func beginRun() {
         guard isEnabled else { return }
+        pendingPersistWorkItem?.cancel()
+        pendingPersistWorkItem = nil
         starts.removeAll(keepingCapacity: true)
         metrics.removeAll(keepingCapacity: true)
         failureReasons.removeAll(keepingCapacity: true)
         metricSamples.removeAll(keepingCapacity: true)
-        persist()
+        persist(immediate: true)
     }
 
     func beginParse() { begin(.parse) }
@@ -140,7 +145,7 @@ final class WowInternalMetricsRecorder {
         } else if stage == .fullDocumentFidelityReady {
             metrics["time_to_full_fidelity_ms"] = rounded
         }
-        persist()
+        persist(immediate: true)
     }
 
     private func fail(_ stage: Stage, reason: String) {
@@ -148,10 +153,30 @@ final class WowInternalMetricsRecorder {
         guard metrics[stage.rawValue] == nil else { return }
         starts.removeValue(forKey: stage)
         failureReasons[stage.rawValue] = reason
-        persist()
+        persist(immediate: true)
     }
 
-    private func persist() {
+    private func persist(immediate: Bool = false) {
+        guard outputPath != nil else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if immediate || now - lastPersistUptime >= persistCoalesceSeconds {
+            pendingPersistWorkItem?.cancel()
+            pendingPersistWorkItem = nil
+            flushPersistNow()
+            return
+        }
+        guard pendingPersistWorkItem == nil else { return }
+        let delay = max(0.01, persistCoalesceSeconds - (now - lastPersistUptime))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingPersistWorkItem = nil
+            self.flushPersistNow()
+        }
+        pendingPersistWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func flushPersistNow() {
         guard let outputPath else { return }
         let payload = Payload(version: 1, metrics: metrics, failureReasons: failureReasons)
         do {
@@ -159,6 +184,7 @@ final class WowInternalMetricsRecorder {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(payload)
             try data.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+            lastPersistUptime = ProcessInfo.processInfo.systemUptime
         } catch {
             // Best effort only; benchmark runner will classify missing instrumentation.
         }

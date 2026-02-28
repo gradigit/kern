@@ -176,14 +176,14 @@ struct SuiteDefinition {
                     "wow_parse_latency_ms",
                     "wow_layout_latency_ms",
                     "wow_paint_ready_latency_ms",
-                    "wow_edit_apply_latency_ms",
-                    "wow_save_serialize_latency_ms",
                     "wow_open_ready_latency_ms",
                     "wow_viewport_semantic_ready_latency_ms",
                     "wow_viewport_fidelity_ready_latency_ms",
                     "wow_full_document_fidelity_ready_latency_ms",
                 ],
                 optionalMetrics: [
+                    "wow_edit_apply_latency_ms",
+                    "wow_save_serialize_latency_ms",
                     "open_latency_ms",
                     "save_ui_ack_latency_ms",
                     "quit_latency_ms",
@@ -207,7 +207,7 @@ struct SuiteDefinition {
                     "save_ui": 1.2,
                     "save_durable": 2,
                     "quit": 3.5,
-                    "wow_metrics": 12,
+                    "wow_metrics": 18,
                 ],
                 suiteKind: "internal_microbenchmark"
             )

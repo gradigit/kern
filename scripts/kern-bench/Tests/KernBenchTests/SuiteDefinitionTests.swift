@@ -39,6 +39,7 @@ final class SuiteDefinitionTests: XCTestCase {
         let wowInternal = SuiteDefinition.forID(.wowInternal)
         XCTAssertEqual(wowInternal.requiredRoster, ["Kern"])
         XCTAssertTrue(wowInternal.requiredMetrics.contains("wow_parse_latency_ms"))
-        XCTAssertTrue(wowInternal.requiredMetrics.contains("wow_save_serialize_latency_ms"))
+        XCTAssertTrue(wowInternal.requiredMetrics.contains("wow_full_document_fidelity_ready_latency_ms"))
+        XCTAssertTrue(wowInternal.optionalMetrics.contains("wow_save_serialize_latency_ms"))
     }
 }

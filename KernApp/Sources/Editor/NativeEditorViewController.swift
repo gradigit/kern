@@ -140,7 +140,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private let stagedPromotionTurboFollowupDelayMs = 6
     private let stagedPromotionTurboStepChars = 4_000_000
     private let stagedPromotionTurboMaxCatchupStepChars = 8_000_000
-    private let stagedPromotionTurboActivateIdleMs = 800
+    private let stagedPromotionTurboActivateIdleMs = 350
     private let stagedPromotionContextChars = 8_000
     private let stagedPromotionViewportGuardChars = 400
     private let stagedPromotionViewportMicroStepChars = 512_000
@@ -943,9 +943,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
     private func preserveStagedPipelineAfterEditIfPossible(mutation: PendingEditMutation?) -> Bool {
         guard let mutation else { return false }
-        // On very large files, tiny accounting drift between markdown/display boundaries
-        // can stall staged promotion after edits. Prefer deterministic reset+recovery.
-        guard stringValue.utf16.count < stagedOpenVeryLargeDocCharThreshold else { return false }
+        // Allow large documents to preserve staged-promotion progress across small edits.
+        // Resetting to initial staged prefix on every keystroke can dramatically delay
+        // full-fidelity completion and trigger repeated viewport churn.
+        let markdownUTF16 = stringValue.utf16.count
+        if markdownUTF16 >= stagedOpenVeryLargeDocCharThreshold {
+            let delta = mutation.deltaUTF16
+            if abs(delta) > 8_192 {
+                return false
+            }
+            WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_pipeline_large_doc_preserve_attempt_count")
+        }
         guard stagedPromotionsAllowed else { return false }
         guard stagedRenderGeneration == renderGeneration else { return false }
         guard var renderedBoundary = stagedRenderedDisplayBoundary else { return false }
@@ -1391,7 +1399,28 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         }
 
         exportWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+        let delaySeconds = exportDebounceDelaySeconds()
+        WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+            "wow_export_debounce_delay_ms_max",
+            candidate: delaySeconds * 1_000.0
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds, execute: workItem)
+    }
+
+    private func exportDebounceDelaySeconds() -> TimeInterval {
+        let textLength = textView.textStorage?.length ?? textView.string.utf16.count
+        if textLength >= stagedOpenVeryLargeDocCharThreshold {
+            // For very large files, serialization is expensive. Prioritize scroll/typing
+            // smoothness and staged rendering progress; save path still force-flushes.
+            if stagedPromotionsAllowed || stagedPromotionInFlight {
+                return 1.6
+            }
+            return 0.9
+        }
+        if textLength >= stagedOpenCharThreshold {
+            return 0.35
+        }
+        return 0.15
     }
 
     /// Force an immediate export of the current editor state, cancelling any pending debounce.
@@ -2795,7 +2824,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             if anchorSlack > 0 {
                 cappedDelta = max(1, min(rawDeltaUTF16, anchorSlack))
             } else {
-                cappedDelta = max(1, min(rawDeltaUTF16, stagedPromotionViewportMicroStepCharsValue(useTurbo: useTurbo)))
+                cappedDelta = max(
+                    1,
+                    min(
+                        rawDeltaUTF16,
+                        stagedPromotionViewportMicroStepCharsValue(
+                            useTurbo: useTurbo,
+                            sinceInteraction: sinceInteraction,
+                            sinceScroll: sinceScroll
+                        )
+                    )
+                )
             }
             if cappedDelta < rawDeltaUTF16 {
                 targetUTF16 = min(totalUTF16, currentRenderedUTF16 + cappedDelta)
@@ -3124,8 +3163,23 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let replacementIsEntirelyBeforeAnchor = replaceEnd <= anchor.characterLocation
         let now = ProcessInfo.processInfo.systemUptime
         let sinceScroll = now - lastScrollEventUptime
-        if sinceScroll < 0.5 {
+        if sinceScroll < 0.6 {
             WowInternalMetricsRecorder.shared.incrementAuxCounter("anchor_rebase_skipped_recent_scroll_count")
+            return
+        }
+        let visibleRange = visibleCharacterRangeForChrome(layoutManager: lm, textContainer: tc)
+        let guardChars = stagedPromotionViewportGuardCharsValue()
+        let guardedVisibleStart = max(0, visibleRange.location - guardChars)
+        let guardedVisibleEnd = min(
+            storage.length,
+            visibleRange.location + visibleRange.length + guardChars
+        )
+        let guardedVisibleRange = NSRange(
+            location: guardedVisibleStart,
+            length: max(0, guardedVisibleEnd - guardedVisibleStart)
+        )
+        if NSIntersectionRange(replaceRange, guardedVisibleRange).length > 0 {
+            WowInternalMetricsRecorder.shared.incrementAuxCounter("anchor_rebase_skipped_viewport_overlap_count")
             return
         }
 
@@ -3300,14 +3354,15 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
         // Spinner prevention: immediately after scroll/input, keep promotion slices tiny so
         // parse+apply work cannot monopolize the main thread.
-        if sinceScroll < 0.35 || sinceInteraction < 0.35 {
+        if sinceScroll < 0.35 {
             WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_micro_cap_tight_count")
             return min(baseline, 64_000)
         }
-        if sinceScroll < 0.9 || sinceInteraction < 0.9 {
+        if sinceScroll < 0.9 {
             WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_micro_cap_medium_count")
             return min(baseline, 128_000)
         }
+        _ = sinceInteraction
         return baseline
     }
 
@@ -3468,13 +3523,15 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             sinceScroll: sinceScroll
         )
         var followupDelayMs = max(4, delayOverrideMs ?? stagedPromotionFollowupDelayMsValue(useTurbo: useTurbo))
-        if sinceInteraction < 0.35 || sinceScroll < 0.35 {
+        if sinceScroll < 0.35 {
             followupDelayMs = max(followupDelayMs, 60)
         }
-        if lastStagedPromotionApplyMs > 33 {
-            followupDelayMs = max(followupDelayMs, 80)
-        } else if lastStagedPromotionApplyMs > 16 {
-            followupDelayMs = max(followupDelayMs, 40)
+        if sinceScroll < 1.2 {
+            if lastStagedPromotionApplyMs > 33 {
+                followupDelayMs = max(followupDelayMs, 40)
+            } else if lastStagedPromotionApplyMs > 16 {
+                followupDelayMs = max(followupDelayMs, 25)
+            }
         }
         stagedPromotionWorkItem = work
         DispatchQueue.main.asyncAfter(

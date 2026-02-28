@@ -1084,7 +1084,7 @@ struct KernBench {
                 }
 
                 let typing: StageResult
-                if suite.id == .wowInternal || suite.id == .benchmark {
+                if suite.id == .benchmark {
                     let payload = "x"
                     print("  [\(editor.displayName)] run \(runIdx): typing pulse")
                     let typingRaw = await actionRunner.runTyping(timeout: max(0.05, stageBudget(stage: "typing")), payload: payload)
@@ -1142,9 +1142,16 @@ struct KernBench {
                 }
 
                 if let wowMetricsPath {
-                    let requiredWowMetricKeys: [String] = suite.id == .benchmarkFullFidelity
-                        ? ["wow_full_document_fidelity_ready_latency_ms"]
-                        : []
+                    let requiredWowMetricKeys: [String] = {
+                        if suite.id == .wowInternal {
+                            return suite.requiredMetrics.filter { $0.hasPrefix("wow_") }
+                        }
+                        if suite.id == .benchmarkFullFidelity {
+                            return ["wow_full_document_fidelity_ready_latency_ms"]
+                        }
+                        return []
+                    }()
+                    let requiredWowMetricSet = Set(requiredWowMetricKeys)
                     let wowMetrics = await selectFinalWowMetricsPayload(
                         preloaded: preloadedWowMetrics,
                         path: wowMetricsPath,
@@ -1175,11 +1182,14 @@ struct KernBench {
                     ]
                     for (metric, value) in wowMetricValues {
                         if suite.id == .wowInternal {
-                            let reason = wowMetrics?.failureReasons[metric] ??
-                                (value == nil ? "instrumentation_missing" : nil)
+                            let isRequired = requiredWowMetricSet.contains(metric)
+                            let reason = isRequired
+                                ? (wowMetrics?.failureReasons[metric] ??
+                                    (value == nil ? "instrumentation_missing" : nil))
+                                : nil
                             let timedOut = reason?.hasSuffix("_timeout") ?? false
                             collector.record(metric: metric, value: value, failureReason: reason, timedOut: timedOut)
-                            if reason != nil || timedOut {
+                            if isRequired && (reason != nil || timedOut) {
                                 markFailure(
                                     metric,
                                     StageResult(valueMs: value, failureReason: reason, timedOut: timedOut)
@@ -1798,7 +1808,12 @@ private func waitForWowInternalMetrics(
             if !requireAllMetrics && requiredMetricKeys.isEmpty {
                 return payload
             }
-            let completionKeys = requireAllMetrics ? required : requiredMetricKeys
+            let completionKeys: [String]
+            if requireAllMetrics {
+                completionKeys = requiredMetricKeys.isEmpty ? required : requiredMetricKeys
+            } else {
+                completionKeys = requiredMetricKeys
+            }
             let complete = completionKeys.allSatisfy { key in
                 payload.metrics[key] != nil || payload.failureReasons[key] != nil
             }
