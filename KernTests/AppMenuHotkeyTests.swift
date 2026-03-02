@@ -15,6 +15,7 @@ final class AppMenuHotkeyTests: XCTestCase {
         }
 
         guard let saveAs = fileMenu.item(withTitle: "Save As…"),
+              let quickOpen = fileMenu.item(withTitle: "Quick Open…"),
               let copyPath = fileMenu.item(withTitle: "Copy Full Path"),
               let reveal = fileMenu.item(withTitle: "Reveal in Finder") else {
             XCTFail("Missing one or more expected File menu items")
@@ -23,6 +24,9 @@ final class AppMenuHotkeyTests: XCTestCase {
 
         XCTAssertEqual(saveAs.keyEquivalent, "s")
         XCTAssertEqual(saveAs.keyEquivalentModifierMask, [.command, .shift])
+
+        XCTAssertEqual(quickOpen.keyEquivalent, "p")
+        XCTAssertEqual(quickOpen.keyEquivalentModifierMask, [.command])
 
         XCTAssertEqual(copyPath.keyEquivalent, "c")
         XCTAssertEqual(copyPath.keyEquivalentModifierMask, [.command, .option])
@@ -42,7 +46,9 @@ final class AppMenuHotkeyTests: XCTestCase {
         }
 
         guard let nextTab = windowMenu.item(withTitle: "Select Next Tab"),
-              let previousTab = windowMenu.item(withTitle: "Select Previous Tab") else {
+              let previousTab = windowMenu.item(withTitle: "Select Previous Tab"),
+              let firstTab = windowMenu.item(withTitle: "Select Tab 1"),
+              let ninthTab = windowMenu.item(withTitle: "Select Tab 9") else {
             XCTFail("Missing tab navigation menu items")
             return
         }
@@ -52,6 +58,12 @@ final class AppMenuHotkeyTests: XCTestCase {
 
         XCTAssertEqual(previousTab.keyEquivalent, "\t")
         XCTAssertEqual(previousTab.keyEquivalentModifierMask, [.control, .shift])
+
+        XCTAssertEqual(firstTab.keyEquivalent, "1")
+        XCTAssertEqual(firstTab.keyEquivalentModifierMask, [.command])
+
+        XCTAssertEqual(ninthTab.keyEquivalent, "9")
+        XCTAssertEqual(ninthTab.keyEquivalentModifierMask, [.command])
     }
 
     private func submenu(named title: String, in menu: NSMenu) -> NSMenu? {

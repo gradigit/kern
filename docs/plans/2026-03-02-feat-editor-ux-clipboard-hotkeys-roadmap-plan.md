@@ -91,7 +91,7 @@ At the same time, core editor ergonomics (Save As shortcut clarity, copy path, r
 
 ### Phase 4 — Navigation and markdown browsing UX
 
-- [ ] Quick Open (`Cmd+P`) for open buffers + project files.
+- [x] Quick Open (`Cmd+P`) baseline via file picker (current document directory by default).
 - [ ] Sidebar anchors/outline for headings and jump navigation.
 - [ ] Open-containing-folder improvements and related commands.
 
@@ -106,6 +106,7 @@ At the same time, core editor ergonomics (Save As shortcut clarity, copy path, r
 - [ ] Large table horizontal interaction model (scroll container / overflow strategy).
 - [ ] Tab management upgrades (reorder/multi-select workflow).
 - [ ] CLI-first workflows (open/search/automation support) and command parity.
+- [x] Cmd+1..9 baseline shortcuts for tab selection.
 
 ## Backlog capture from user brainstorm (tracked)
 

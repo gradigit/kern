@@ -134,6 +134,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([fileURL])
     }
 
+    @objc func quickOpen(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Quickly open a file"
+        if let fileURL = currentDocument()?.fileURL {
+            panel.directoryURL = fileURL.deletingLastPathComponent()
+        }
+        panel.begin { response in
+            guard response == .OK, let url = panel.urls.first else { return }
+            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
+                if let error {
+                    NSLog("[AppDelegate] Quick Open failed for %@: %@", url.path, error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    @objc func selectTabByIndexFromMenu(_ sender: NSMenuItem) {
+        let index = sender.tag - 1
+        guard index >= 0 else { return }
+        guard let currentWindow = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        let tabs = currentWindow.tabbedWindows ?? [currentWindow]
+        guard index < tabs.count else {
+            NSSound.beep()
+            return
+        }
+        tabs[index].makeKeyAndOrderFront(sender)
+    }
+
     private func currentDocument() -> NSDocument? {
         // Prefer ordered windows (front-most first); menu actions can temporarily clear keyWindow.
         for window in NSApp.orderedWindows {
@@ -322,6 +354,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "t")
         fileMenu.addItem(withTitle: "Open…", action: #selector(NSDocumentController.openDocument(_:)), keyEquivalent: "o")
+        let quickOpenItem = NSMenuItem(title: "Quick Open…", action: #selector(quickOpen(_:)), keyEquivalent: "p")
+        quickOpenItem.target = self
+        fileMenu.addItem(quickOpenItem)
         fileMenu.addItem(NSMenuItem.separator())
         let saveItem = fileMenu.addItem(withTitle: "Save", action: #selector(saveDocument(_:)), keyEquivalent: "s")
         saveItem.target = self
@@ -413,6 +448,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let prevTabItem = NSMenuItem(title: "Select Previous Tab", action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "\t")
         prevTabItem.keyEquivalentModifierMask = [.control, .shift]
         windowMenu.addItem(prevTabItem)
+        windowMenu.addItem(NSMenuItem.separator())
+        for tabIndex in 1...9 {
+            let item = NSMenuItem(
+                title: "Select Tab \(tabIndex)",
+                action: #selector(selectTabByIndexFromMenu(_:)),
+                keyEquivalent: "\(tabIndex)"
+            )
+            item.keyEquivalentModifierMask = [.command]
+            item.target = self
+            item.tag = tabIndex
+            windowMenu.addItem(item)
+        }
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
 
@@ -431,6 +478,9 @@ extension AppDelegate: NSMenuItemValidation {
             return currentDocument() != nil
         case #selector(copyFullPath(_:)), #selector(revealInFinder(_:)):
             return currentDocument()?.fileURL != nil
+        case #selector(selectTabByIndexFromMenu(_:)):
+            guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return false }
+            return (window.tabbedWindows?.isEmpty == false) || window.isVisible
         case #selector(showPreferences(_:)):
             return true
         case #selector(toggleKeepRunning(_:)):
