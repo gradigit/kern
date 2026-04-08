@@ -96,7 +96,7 @@ final class NativeEditorPreferencesWindowController: NSWindowController {
             remoteImageLoadingCheckbox.state =
                 defaults.bool(forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey) ? .on : .off
         } else {
-            remoteImageLoadingCheckbox.state = .on
+            remoteImageLoadingCheckbox.state = .off
         }
     }
 
@@ -124,7 +124,7 @@ final class NativeEditorPreferencesWindowController: NSWindowController {
             forKey: "nativeEditor.mermaidRenderMode"
         )
         defaults.set("glyph", forKey: "nativeEditor.checkboxHitTarget")
-        defaults.set(true, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
+        defaults.set(false, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
 
         refreshFromDefaults()
         postPreferencesDidChange()
@@ -186,7 +186,7 @@ final class NativeEditorPreferencesWindowController: NSWindowController {
         let headingCheckboxesHelp =
             "If enabled, headings like \"## [ ] heading\" are parsed as heading tasks. If disabled, the checkbox syntax stays literal."
         let remoteImageLoadingHelp =
-            "If enabled, HTTP/HTTPS images load in the editor. Local file images always load. Disable for privacy/offline workflows."
+            "If enabled, HTTPS images load in the editor. Local file images always load. Disable for privacy/offline workflows."
 
         configurePopup(
             exportDialectPopup,

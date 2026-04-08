@@ -2,11 +2,15 @@
 
 ## Reporting a vulnerability
 
+For non-security support, use [SUPPORT.md](SUPPORT.md) instead of this path.
+
 Use **GitHub private vulnerability reporting** for sensitive security issues in this repository:
 
 - `https://github.com/kerneditor/kern/security/advisories/new`
 
 Do **not** open a public issue for an undisclosed vulnerability.
+
+For general support, install/build help, and non-security bug reports, use [SUPPORT.md](SUPPORT.md).
 
 If you cannot access the advisory form, contact GitHub Support privately and mention this repository.
 
@@ -38,6 +42,8 @@ Examples of issues that are in scope:
 - unsafe local file handling
 - path traversal or sandbox escape behavior
 - code execution paths triggered by crafted markdown or assets
+- suspicious published release assets or checksum mismatches
+- suspected release-asset tampering or replacement
 - data loss or corruption caused by malformed input
 
 Examples that are usually out of scope:

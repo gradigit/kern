@@ -79,7 +79,7 @@ enum NativeMarkdownCodec {
         /// Ordered list numbering behavior for import/export.
         var orderedListNumbering: OrderedListNumbering = .gfmDefault
         /// Enable remote image loading for image attachments (local file images always load).
-        var remoteImageLoadingEnabled: Bool = true
+        var remoteImageLoadingEnabled: Bool = false
         /// Enable syntax highlighting for fenced code blocks.
         var syntaxHighlightingEnabled: Bool = true
         /// Mermaid render mode for fenced mermaid blocks.

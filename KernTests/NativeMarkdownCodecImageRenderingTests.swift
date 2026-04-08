@@ -2,6 +2,21 @@ import XCTest
 @testable import KernTextKit
 
 final class NativeMarkdownCodecImageRenderingTests: XCTestCase {
+    func testRemoteImageLoadingDefaultsOffForFreshPreferences() {
+        XCTAssertFalse(NativeMarkdownCodec.Options().remoteImageLoadingEnabled)
+
+        let suiteName = "NativeMarkdownCodecImageRenderingTests.\(#function)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let options = NativeMarkdownCodec.Options.fromUserDefaults(defaults)
+        XCTAssertFalse(options.remoteImageLoadingEnabled)
+    }
+
     @MainActor
     func testLocalImagesFromStressFixtureResolveAndRender() throws {
         let fixtureURL = repoRoot()
@@ -51,6 +66,31 @@ final class NativeMarkdownCodecImageRenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testAbsoluteFileURLImageStillResolvesAndRenders() throws {
+        let imageURL = repoRoot()
+            .appendingPathComponent("test-fixtures", isDirectory: true)
+            .appendingPathComponent("screenshots", isDirectory: true)
+            .appendingPathComponent("01-default-sample.png", isDirectory: false)
+
+        let attributed = NativeMarkdownCodec.importMarkdown("![Local](\(imageURL.absoluteString))", options: .fromUserDefaults())
+        let images = collectImageAttachments(in: attributed)
+        XCTAssertEqual(images.count, 1)
+
+        guard let image = images.first else { return }
+        XCTAssertEqual(image.resolvedURL?.standardizedFileURL, imageURL.standardizedFileURL)
+        XCTAssertTrue(image.resolvedURL?.isFileURL == true)
+
+        let ready = expectation(description: "Absolute file URL image loads asynchronously")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            ready.fulfill()
+        }
+        waitForExpectations(timeout: 3.0)
+
+        XCTAssertTrue(image.debugHasRenderedImage)
+        XCTAssertEqual(image.loadState, .ready)
+    }
+
+    @MainActor
     func testImageAttachmentsCarryClickableLinkAttributes() throws {
         let fixtureURL = repoRoot()
             .appendingPathComponent("test-fixtures", isDirectory: true)
@@ -87,6 +127,22 @@ final class NativeMarkdownCodecImageRenderingTests: XCTestCase {
 
         XCTAssertTrue(sawLocal, "Expected local image attachment with link target")
         XCTAssertTrue(sawRemote, "Expected remote image attachment with link target")
+    }
+
+    @MainActor
+    func testRemoteHTTPImageStaysUnresolvedEvenWhenRemoteLoadingEnabled() {
+        var options = NativeMarkdownCodec.Options.fromUserDefaults()
+        options.remoteImageLoadingEnabled = true
+
+        let attributed = NativeMarkdownCodec.importMarkdown("![Remote](http://example.com/insecure-image.png)", options: options)
+        let images = collectImageAttachments(in: attributed)
+        XCTAssertEqual(images.count, 1)
+
+        guard let image = images.first else { return }
+        XCTAssertNil(image.resolvedURL)
+        XCTAssertTrue(image.allowsRemoteLoading)
+        XCTAssertEqual(image.loadState, .failed)
+        XCTAssertFalse(image.debugHasRenderedImage)
     }
 
     // MARK: - Helpers

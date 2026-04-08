@@ -96,7 +96,7 @@ final class MarkdownImageAttachment: NSTextAttachment {
     private var isRemoteURL: Bool {
         guard let resolvedURL, let scheme = resolvedURL.scheme?.lowercased() else { return false }
         if resolvedURL.isFileURL { return false }
-        return scheme == "http" || scheme == "https"
+        return scheme == "https"
     }
 
     private func loadImageIfNeeded() {
@@ -195,7 +195,15 @@ final class MarkdownImageAttachment: NSTextAttachment {
         guard !trimmed.isEmpty else { return nil }
 
         if let absolute = URL(string: trimmed), absolute.scheme != nil {
-            return absolute
+            guard let scheme = absolute.scheme?.lowercased() else { return nil }
+            switch scheme {
+            case "https":
+                return absolute
+            case "file":
+                return absolute.standardizedFileURL
+            default:
+                return nil
+            }
         }
 
         let unescaped = trimmed.removingPercentEncoding ?? trimmed
