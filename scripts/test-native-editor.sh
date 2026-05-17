@@ -122,6 +122,93 @@ fail_on_skipped_tests() {
   return 0
 }
 
+write_skip_summary() {
+  local log_file="$1"
+  local out_file="$2"
+
+  if [ ! -f "$log_file" ]; then
+    return 0
+  fi
+
+  python3 - "$log_file" "$out_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+log_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+reason_re = re.compile(r"Test skipped - (.*)$")
+
+counts = {
+    "perf": 0,
+    "exhaustive": 0,
+    "snapshots": 0,
+    "spec": 0,
+    "report": 0,
+    "other": 0,
+}
+
+for line in log_path.read_text(errors="ignore").splitlines():
+    match = reason_re.search(line)
+    if not match:
+        continue
+    reason = match.group(1)
+    if "KERN_ENABLE_EXHAUSTIVE_TESTS" in reason:
+        counts["exhaustive"] += 1
+    elif "KERN_ENABLE_SNAPSHOT_TESTS" in reason:
+        counts["snapshots"] += 1
+    elif "KERN_ENABLE_SPEC_CONFORMANCE_TESTS" in reason:
+        counts["spec"] += 1
+    elif "KERN_ENABLE_PERF_TESTS" in reason or "KERN_ENABLE_MERMAID_MODE_BENCHMARKS" in reason:
+        counts["perf"] += 1
+    elif "alignment report" in reason:
+        counts["report"] += 1
+    else:
+        counts["other"] += 1
+
+total = sum(counts.values())
+lines = [
+    f"total_skipped={total}",
+    f"perf={counts['perf']}",
+    f"exhaustive={counts['exhaustive']}",
+    f"snapshots={counts['snapshots']}",
+    f"spec={counts['spec']}",
+    f"report={counts['report']}",
+    f"other={counts['other']}",
+]
+if total > 0:
+    lines.append("note=default green coverage excludes snapshot/perf/exhaustive/spec lanes unless explicitly enabled")
+out_path.write_text("\n".join(lines) + "\n")
+PY
+}
+
+print_skip_summary_if_present() {
+  local summary_file="$1"
+  [ -f "$summary_file" ] || return 0
+
+  local total_skipped
+  total_skipped="$(grep '^total_skipped=' "$summary_file" | cut -d= -f2)"
+  if [ -z "${total_skipped:-}" ]; then
+    return 0
+  fi
+
+  echo "▸ Skipped test summary..."
+  echo "  total: $total_skipped"
+  echo "  perf: $(grep '^perf=' "$summary_file" | cut -d= -f2)"
+  echo "  exhaustive: $(grep '^exhaustive=' "$summary_file" | cut -d= -f2)"
+  echo "  snapshots: $(grep '^snapshots=' "$summary_file" | cut -d= -f2)"
+  echo "  spec: $(grep '^spec=' "$summary_file" | cut -d= -f2)"
+  echo "  report-only: $(grep '^report=' "$summary_file" | cut -d= -f2)"
+  echo "  other: $(grep '^other=' "$summary_file" | cut -d= -f2)"
+  local note
+  note="$(grep '^note=' "$summary_file" | cut -d= -f2- || true)"
+  if [ -n "${note:-}" ]; then
+    echo "  note: $note"
+  fi
+  echo "  artifact: $summary_file"
+  echo ""
+}
+
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="$(pwd)/test-results/native-editor/$TS"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$(pwd)/.derived-data/tests}"
@@ -353,6 +440,8 @@ if [ "$RUN_UNIT" = true ]; then
     if ! fail_on_skipped_tests "$OUT_DIR/unit.log" "Unit snapshot verification"; then
       exit 4
     fi
+    write_skip_summary "$OUT_DIR/unit.log" "$OUT_DIR/skip-summary.txt"
+    print_skip_summary_if_present "$OUT_DIR/skip-summary.txt"
     echo "  ✓ Snapshot verification passed"
     echo ""
   else
@@ -375,6 +464,8 @@ if [ "$RUN_UNIT" = true ]; then
     if ! fail_on_skipped_tests "$OUT_DIR/unit.log" "Unit tests"; then
       exit 4
     fi
+    write_skip_summary "$OUT_DIR/unit.log" "$OUT_DIR/skip-summary.txt"
+    print_skip_summary_if_present "$OUT_DIR/skip-summary.txt"
     echo "  ✓ Unit tests passed"
     echo ""
   fi

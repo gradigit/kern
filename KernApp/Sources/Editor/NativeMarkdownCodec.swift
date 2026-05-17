@@ -7,7 +7,7 @@
 /// - It encodes semantics with custom attributes (kern.*) so export is reliable.
 /// - It does not aim for full CommonMark/GFM compliance yet.
 enum NativeMarkdownCodec {
-    struct ReferenceDefinition {
+    struct ReferenceDefinition: Sendable {
         let id: String
         let destination: String
         let title: String?
@@ -16,20 +16,141 @@ enum NativeMarkdownCodec {
     /// Import-time context passed through the call chain instead of static mutable state.
     private struct ImportContext {
         let referenceDefinitions: [String: ReferenceDefinition]
+        let referenceDefinitionsSignature: Int
         let baseURL: URL?
+        let baseURLSignature: String
         let options: Options
         let strictConformanceRoundTripMode: Bool
         let syntaxHighlightingEnabled: Bool
         let inlineParseCache: InlineParseCache?
+        let themeSignature: String
+        let profiler: ImportProfiler?
+    }
+
+    enum ImportProfilePhase: String, CaseIterable, Codable, Sendable {
+        case normalizeLineEndings
+        case lineSplit
+        case referenceDefinitionScan
+        case importLoop
+        case paragraphFastPathBlock
+        case paragraphFallbackBlock
+        case referenceDefinitionBlock
+        case mathBlock
+        case fencedCodeBlock
+        case mermaidBlock
+        case indentedCodeBlock
+        case gfmTableBlock
+        case thematicBreakBlock
+        case atxHeadingBlock
+        case setextHeadingBlock
+        case taskListBlock
+        case orderedTaskBlock
+        case orderedListBlock
+        case bulletListBlock
+        case inlineParse
+        case parseGfmTable
+        case makeCodeBlockAttributed
+        case makeMermaidAttachmentAttributed
+        case makeBlockMathAttributed
+        case makeGfmTableAttributed
+        case makeImageAttachmentAttributed
+        case applySyntaxHighlighting
+    }
+
+    struct ImportProfileSnapshot: Codable, Sendable {
+        let markdownUTF16Count: Int
+        let lineCount: Int
+        let phaseDurationsMs: [String: Double]
+        let phaseCounts: [String: Int]
+        let totalInlineUTF16: Int
+        let maxInlineUTF16: Int
+    }
+
+    struct ProfiledImportResult {
+        let attributed: NSAttributedString
+        let profile: ImportProfileSnapshot
+    }
+
+    final class ImportProfiler {
+        private var markdownUTF16Count: Int = 0
+        private var lineCount: Int = 0
+        private var phaseDurationsNs: [ImportProfilePhase: UInt64] = [:]
+        private var phaseCounts: [ImportProfilePhase: Int] = [:]
+        private var totalInlineUTF16: Int = 0
+        private var maxInlineUTF16: Int = 0
+        private var inlineParseDepth: Int = 0
+
+        func setMarkdownUTF16Count(_ count: Int) {
+            markdownUTF16Count = max(0, count)
+        }
+
+        func setLineCount(_ count: Int) {
+            lineCount = max(0, count)
+        }
+
+        @discardableResult
+        func measure<T>(_ phase: ImportProfilePhase, _ body: () -> T) -> T {
+            phaseCounts[phase, default: 0] += 1
+            let start = DispatchTime.now().uptimeNanoseconds
+            let result = body()
+            let elapsed = DispatchTime.now().uptimeNanoseconds - start
+            phaseDurationsNs[phase, default: 0] += elapsed
+            return result
+        }
+
+        func recordInlineUTF16(_ count: Int) {
+            let clamped = max(0, count)
+            totalInlineUTF16 += clamped
+            maxInlineUTF16 = max(maxInlineUTF16, clamped)
+        }
+
+        @discardableResult
+        func measureInlineParse<T>(utf16Count: Int, _ body: () -> T) -> T {
+            let isOutermost = inlineParseDepth == 0
+            if isOutermost {
+                recordInlineUTF16(utf16Count)
+                phaseCounts[.inlineParse, default: 0] += 1
+            }
+            inlineParseDepth += 1
+            let start = isOutermost ? DispatchTime.now().uptimeNanoseconds : 0
+            let result = body()
+            inlineParseDepth -= 1
+            if isOutermost {
+                let elapsed = DispatchTime.now().uptimeNanoseconds - start
+                phaseDurationsNs[.inlineParse, default: 0] += elapsed
+            }
+            return result
+        }
+
+        func snapshot() -> ImportProfileSnapshot {
+            let durationsMs = phaseDurationsNs.reduce(into: [String: Double]()) { partial, entry in
+                partial[entry.key.rawValue] = Double(entry.value) / 1_000_000
+            }
+            let counts = phaseCounts.reduce(into: [String: Int]()) { partial, entry in
+                partial[entry.key.rawValue] = entry.value
+            }
+            return ImportProfileSnapshot(
+                markdownUTF16Count: markdownUTF16Count,
+                lineCount: lineCount,
+                phaseDurationsMs: durationsMs,
+                phaseCounts: counts,
+                totalInlineUTF16: totalInlineUTF16,
+                maxInlineUTF16: maxInlineUTF16
+            )
+        }
     }
 
     private final class InlineParseCache: @unchecked Sendable {
         private let maxEntries: Int
+        private let maxApproximateUTF16Cost: Int
         private let lock = NSLock()
         private var storage: [InlineParseCacheKey: NSAttributedString] = [:]
+        private var storageCosts: [InlineParseCacheKey: Int] = [:]
+        private var totalApproximateUTF16Cost: Int = 0
 
-        init(maxEntries: Int) {
+        init(maxEntries: Int, maxApproximateUTF16Cost: Int) {
             self.maxEntries = max(128, maxEntries)
+            self.maxApproximateUTF16Cost = max(262_144, maxApproximateUTF16Cost)
         }
 
         func value(for key: InlineParseCacheKey) -> NSAttributedString? {
@@ -41,25 +162,137 @@ enum NativeMarkdownCodec {
         func insert(_ value: NSAttributedString, for key: InlineParseCacheKey) {
             lock.lock()
             defer { lock.unlock() }
+            let approximateCost = key.text.utf16.count + value.length
+            if let existingCost = storageCosts[key] {
+                totalApproximateUTF16Cost = max(0, totalApproximateUTF16Cost - existingCost)
+            } else if storage.count >= maxEntries
+                        || totalApproximateUTF16Cost + approximateCost > maxApproximateUTF16Cost {
+                storage.removeAll(keepingCapacity: true)
+                storageCosts.removeAll(keepingCapacity: true)
+                totalApproximateUTF16Cost = 0
+            }
+            storage[key] = value
+            storageCosts[key] = approximateCost
+            totalApproximateUTF16Cost += approximateCost
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.removeAll(keepingCapacity: true)
+            storageCosts.removeAll(keepingCapacity: true)
+            totalApproximateUTF16Cost = 0
+        }
+    }
+
+    private final class CodeBlockAttributedCache: @unchecked Sendable {
+        private let maxEntries: Int
+        private let lock = NSLock()
+        private var storage: [CodeBlockAttributedCacheKey: NSAttributedString] = [:]
+
+        init(maxEntries: Int) {
+            self.maxEntries = max(64, maxEntries)
+        }
+
+        func value(for key: CodeBlockAttributedCacheKey) -> NSAttributedString? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[key]
+        }
+
+        func insert(_ value: NSAttributedString, for key: CodeBlockAttributedCacheKey) {
+            lock.lock()
+            defer { lock.unlock() }
             if storage[key] == nil, storage.count >= maxEntries {
                 storage.removeAll(keepingCapacity: true)
             }
             storage[key] = value
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private final class TableAttributedCache: @unchecked Sendable {
+        private let maxEntries: Int
+        private let lock = NSLock()
+        private var storage: [TableAttributedCacheKey: NSAttributedString] = [:]
+
+        init(maxEntries: Int) {
+            self.maxEntries = max(32, maxEntries)
+        }
+
+        func value(for key: TableAttributedCacheKey) -> NSAttributedString? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[key]
+        }
+
+        func insert(_ value: NSAttributedString, for key: TableAttributedCacheKey) {
+            lock.lock()
+            defer { lock.unlock() }
+            if storage[key] == nil, storage.count >= maxEntries {
+                storage.removeAll(keepingCapacity: true)
+            }
+            storage[key] = value
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.removeAll(keepingCapacity: true)
         }
     }
 
     /// Shared inline parse cache reused across import passes (including staged promotions).
     /// This preserves hot repeated fragments (e.g. emphasis/link patterns in benchmark fixtures)
     /// across successive slice imports instead of rewarming from empty each pass.
-    private static let sharedInlineParseCache = InlineParseCache(maxEntries: 18_000)
+    private static let sharedInlineParseCache = InlineParseCache(
+        maxEntries: 18_000,
+        maxApproximateUTF16Cost: 8_000_000
+    )
+    /// Shared code-block attributed cache reused across import passes.
+    /// This is most valuable for large fixtures with repeated fenced blocks or repeated staged-promotion imports.
+    private static let sharedCodeBlockAttributedCache = CodeBlockAttributedCache(maxEntries: 512)
+    /// Shared table attributed cache reused across import passes.
+    /// This is most valuable when large fixtures contain repeated identical table blocks.
+    private static let sharedTableAttributedCache = TableAttributedCache(maxEntries: 256)
 
-    struct Options: Equatable {
-        enum ExportDialect: String {
+    @inline(__always)
+    private static func measureImportPhase<T>(
+        _ phase: ImportProfilePhase,
+        profiler: ImportProfiler?,
+        _ body: () -> T
+    ) -> T {
+        guard let profiler else { return body() }
+        return profiler.measure(phase, body)
+    }
+
+    private static func inlineParseCacheMaxUTF16(for style: InlineStyle) -> Int {
+        if let raw = ProcessInfo.processInfo.environment["KERN_INLINE_PARSE_CACHE_MAX_UTF16"],
+           let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           parsed > 0
+        {
+            return parsed
+        }
+        _ = style
+        return 384
+    }
+
+    static func inlineParseCacheMaxUTF16ForTesting() -> Int {
+        inlineParseCacheMaxUTF16(for: InlineStyle())
+    }
+
+    struct Options: Equatable, Sendable {
+        enum ExportDialect: String, Sendable {
             case gfm
             case kern
         }
 
-        enum GfmExtensionExportStrategy: String {
+        enum GfmExtensionExportStrategy: String, Sendable {
             /// Preserve Kern extension syntaxes even when exporting in GFM mode (default).
             /// This maximizes Kern round-trip fidelity.
             case preserve
@@ -72,21 +305,21 @@ enum NativeMarkdownCodec {
             case lint
         }
 
-        enum TaskRendering: String {
+        enum TaskRendering: String, Sendable {
             /// Checkbox-only task rendering (GitHub-like).
             case gfm
             /// Bulleted task items render as bullet dot + checkbox (`• ☐ ...`).
             case kern
         }
 
-        enum OrderedListNumbering: String {
+        enum OrderedListNumbering: String, Sendable {
             /// Preserve the typed numeric markers on import and export.
             case preserveTyped
             /// Follow GFM semantics: only the first marker matters; subsequent items may be normalized.
             case gfmDefault
         }
 
-        enum MermaidRenderMode: String {
+        enum MermaidRenderMode: String, Sendable {
             /// Always render Mermaid using the rich native diagram renderer.
             case rich
             /// Always render Mermaid using the lightweight ASCII renderer.
@@ -109,7 +342,7 @@ enum NativeMarkdownCodec {
         /// Ordered list numbering behavior for import/export.
         var orderedListNumbering: OrderedListNumbering = .gfmDefault
         /// Enable remote image loading for image attachments (local file images always load).
-        var remoteImageLoadingEnabled: Bool = true
+        var remoteImageLoadingEnabled: Bool = false
         /// Enable syntax highlighting for fenced code blocks.
         var syntaxHighlightingEnabled: Bool = true
         /// Mermaid render mode for fenced mermaid blocks.
@@ -180,13 +413,22 @@ enum NativeMarkdownCodec {
         _ markdown: String,
         options: Options = Options(),
         baseURL: URL? = nil,
-        precomputedReferenceDefinitions: [String: ReferenceDefinition]? = nil
+        precomputedReferenceDefinitions: [String: ReferenceDefinition]? = nil,
+        profiler: ImportProfiler? = nil
     ) -> NSAttributedString {
-        let markdown = normalizeLineEndings(markdown)
+        @inline(__always)
+        func profile<T>(_ phase: ImportProfilePhase, _ body: () -> T) -> T {
+            measureImportPhase(phase, profiler: profiler, body)
+        }
+
+        let markdown = profile(.normalizeLineEndings) {
+            normalizeLineEndings(markdown)
+        }
         let baseFont = NativeEditorAppearance.baseFont()
         let defaultBaseAttributes = baseAttributes(baseFont: baseFont)
         let plainNewline = NSAttributedString(string: "\n", attributes: defaultBaseAttributes)
         let markdownLength = markdown.utf16.count
+        profiler?.setMarkdownUTF16Count(markdownLength)
         if shouldUseLargeDocumentPlainImport(options: options, markdownLength: markdownLength) {
             return makeLargeDocumentPlainAttributed(markdown: markdown, baseFont: baseFont)
         }
@@ -194,9 +436,13 @@ enum NativeMarkdownCodec {
         let result = NSMutableAttributedString()
 
         // Preserve empty lines by splitting with omittingEmptySubsequences=false.
-        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-
-        let referenceDefinitions = precomputedReferenceDefinitions ?? collectReferenceDefinitions(lines: lines)
+        let lines = profile(.lineSplit) {
+            markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        }
+        profiler?.setLineCount(lines.count)
+        let referenceDefinitions = precomputedReferenceDefinitions ?? profile(.referenceDefinitionScan) {
+            collectReferenceDefinitions(lines: lines)
+        }
         let syntaxHighlightingEnabled = shouldEnableSyntaxHighlighting(
             options: options,
             markdownLength: markdownLength
@@ -204,7 +450,7 @@ enum NativeMarkdownCodec {
         let inlineParseCache: InlineParseCache? = {
             // Large fixtures contain repeated inline-dense fragments. Reusing one cache across
             // staged imports avoids rewarming the same entries for every promotion slice.
-            guard markdownLength >= 120_000 else { return nil }
+            guard markdownLength >= 100_000 else { return nil }
             if ProcessInfo.processInfo.environment["KERN_DISABLE_INLINE_PARSE_CACHE"] == "1" {
                 return nil
             }
@@ -212,11 +458,15 @@ enum NativeMarkdownCodec {
         }()
         let ctx = ImportContext(
             referenceDefinitions: referenceDefinitions,
+            referenceDefinitionsSignature: inlineCacheReferenceDefinitionsSignature(referenceDefinitions),
             baseURL: baseURL,
+            baseURLSignature: inlineCacheBaseURLSignature(baseURL),
             options: options,
             strictConformanceRoundTripMode: options.strictConformanceRoundTripMode,
             syntaxHighlightingEnabled: syntaxHighlightingEnabled,
-            inlineParseCache: inlineParseCache
+            inlineParseCache: inlineParseCache,
+            themeSignature: NativeEditorAppearance.appearanceCacheSignature(),
+            profiler: profiler
         )
 
         // For GFM-style ordered list semantics, only the first marker matters and the rest are
@@ -239,16 +489,172 @@ enum NativeMarkdownCodec {
             orderedCountersByDepth[d] = out + 1
             return out
         }
+
+        struct CollectedContinuationBody {
+            let combined: String
+            let nextIndex: Int
+            let containsInlineSyntax: Bool
+        }
+
+        func makeInlineContent(_ body: CollectedContinuationBody, baseFont: NSFont) -> NSAttributedString {
+            if !ctx.strictConformanceRoundTripMode, !body.containsInlineSyntax {
+                return makeInlineAttributed(body.combined, baseFont: baseFont, style: InlineStyle())
+            }
+            return parseInline(body.combined, baseFont: baseFont, ctx: ctx)
+        }
+
+        func collectParagraphBody(startIndex: Int, firstLine line: String, quoteDepth: Int) -> CollectedContinuationBody {
+            let nextIndex = startIndex + 1
+            let (firstLine, initialHardBreak) = stripHardBreakMarker(line, ctx: ctx)
+            var pendingHardBreak = initialHardBreak
+            var continuationBuilder = ContinuationTextBuilder(initial: firstLine, kind: .paragraph)
+            var j = nextIndex
+            while j < lines.count {
+                guard let nextLine = paragraphContinuationText(at: j, quoteDepth: quoteDepth) else { break }
+
+                let (nextText, nextHardBreak) = stripHardBreakMarker(nextLine, ctx: ctx)
+                continuationBuilder.append(nextText, pendingHardBreak: pendingHardBreak)
+                pendingHardBreak = nextHardBreak
+                j += 1
+            }
+
+            let built = continuationBuilder.build(finalHardBreak: pendingHardBreak)
+            return CollectedContinuationBody(combined: built.text, nextIndex: j, containsInlineSyntax: built.containsInlineSyntax)
+        }
+
+        func collectListBody(startIndex: Int, firstLine line: String, continuationIndent: Int) -> CollectedContinuationBody {
+            let (firstLine, initialHardBreak) = stripHardBreakMarker(line, ctx: ctx)
+            var pendingHardBreak = initialHardBreak
+            let continuationIndentPrefix = String(repeating: " ", count: max(0, continuationIndent))
+            var continuationBuilder = ContinuationTextBuilder(initial: firstLine, kind: .list)
+            var j = startIndex + 1
+            while j < lines.count {
+                let next = lines[j]
+                guard next.hasPrefix(continuationIndentPrefix) else { break }
+                let stripped = String(next.dropFirst(continuationIndentPrefix.count))
+
+                if startsNestedBlockWithinListContinuation(stripped, options: options) {
+                    break
+                }
+
+                let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
+                continuationBuilder.append(nextText, pendingHardBreak: pendingHardBreak)
+                pendingHardBreak = nextHardBreak
+                j += 1
+            }
+
+            let built = continuationBuilder.build(finalHardBreak: pendingHardBreak)
+            return CollectedContinuationBody(combined: built.text, nextIndex: j, containsInlineSyntax: built.containsInlineSyntax)
+        }
+
         var tableCounter = 0
         var codeBlockCounter = 0
+        var paragraphBoundaryCache: [ParagraphContinuationBoundaryCacheKey: Bool] = [:]
+        var paragraphBoundaryCacheDefaultQuote = Array(repeating: UInt8(0), count: lines.count)
+
+        @inline(__always)
+        func paragraphContinuationLine(at index: Int, quoteDepth: Int) -> String? {
+            guard index >= 0, index < lines.count else { return nil }
+            var nextLine = lines[index]
+            if quoteDepth > 0 {
+                guard let q = parseBlockquotePrefix(nextLine), q.depth == quoteDepth else { return nil }
+                nextLine = q.text
+            }
+            return nextLine
+        }
+
+        @inline(__always)
+        func paragraphContinuationText(at index: Int, quoteDepth: Int) -> String? {
+            if quoteDepth == 0, index >= 0, index < paragraphBoundaryCacheDefaultQuote.count {
+                switch paragraphBoundaryCacheDefaultQuote[index] {
+                case 1:
+                    return nil
+                case 2:
+                    return lines[index]
+                default:
+                    break
+                }
+            }
+            let cacheKey = ParagraphContinuationBoundaryCacheKey(lineIndex: index, quoteDepth: quoteDepth)
+            if quoteDepth != 0, let cached = paragraphBoundaryCache[cacheKey], cached {
+                return nil
+            }
+
+            guard let nextLine = paragraphContinuationLine(at: index, quoteDepth: quoteDepth) else {
+                if quoteDepth == 0, index >= 0, index < paragraphBoundaryCacheDefaultQuote.count {
+                    paragraphBoundaryCacheDefaultQuote[index] = 1
+                } else {
+                    paragraphBoundaryCache[cacheKey] = true
+                }
+                return nil
+            }
+
+            let isBoundary: Bool
+            if isBlankMarkdownLine(nextLine) {
+                isBoundary = true
+            } else if mayStartStructuralBlockLine(nextLine) {
+                var matched = false
+                let first = nextLine.first
+                switch first {
+                case "[":
+                    matched = parseReferenceDefinition(nextLine) != nil
+                case "$":
+                    matched = isMathBlockDelimiter(nextLine)
+                case "`", "~":
+                    matched = parseFenceStart(nextLine) != nil
+                case "#":
+                    matched = parseHeading(nextLine) != nil
+                case "-", "*", "+":
+                    matched = parseTask(nextLine) != nil
+                        || parseBullet(nextLine) != nil
+                        || parseThematicBreak(nextLine) != nil
+                    if !matched, first == "-" {
+                        matched = mayBeSetextUnderlineLine(nextLine) && parseSetextUnderline(nextLine) != nil
+                    }
+                case "_", "=":
+                    matched = parseThematicBreak(nextLine) != nil
+                        || (mayBeSetextUnderlineLine(nextLine) && parseSetextUnderline(nextLine) != nil)
+                default:
+                    if let first, first.isNumber {
+                        matched = (options.orderedTasksEnabled && parseOrderedTask(nextLine) != nil)
+                            || parseOrdered(nextLine) != nil
+                    }
+                }
+
+                if !matched, nextLine.contains("|") {
+                    matched = canStartGfmTable(lines, startIndex: index)
+                        && parseGfmTable(lines, startIndex: index, profiler: nil) != nil
+                }
+
+                if !matched, canStartIndentedCode(lines, at: index, quoteDepth: quoteDepth) {
+                    matched = parseIndentedCodeBlock(lines, startIndex: index, quoteDepth: quoteDepth) != nil
+                }
+
+                isBoundary = matched
+            } else {
+                isBoundary = false
+            }
+
+            if quoteDepth == 0, index >= 0, index < paragraphBoundaryCacheDefaultQuote.count {
+                paragraphBoundaryCacheDefaultQuote[index] = isBoundary ? 1 : 2
+            } else {
+                paragraphBoundaryCache[cacheKey] = isBoundary
+            }
+            return isBoundary ? nil : nextLine
+        }
+
+        func isParagraphBoundary(at index: Int, quoteDepth: Int) -> Bool {
+            paragraphContinuationText(at: index, quoteDepth: quoteDepth) == nil
+        }
 
         var i = 0
-        while i < lines.count {
-            let rawLine = lines[i]
-            let quote = parseBlockquotePrefix(rawLine)
-            let quoteDepth = quote?.depth ?? 0
-            let line = quote?.text ?? rawLine
-            let isBlankLine = isBlankMarkdownLine(line)
+        profile(.importLoop) {
+            while i < lines.count {
+                let rawLine = lines[i]
+                let quote = parseBlockquotePrefix(rawLine)
+                let quoteDepth = quote?.depth ?? 0
+                let line = quote?.text ?? rawLine
+                let isBlankLine = isBlankMarkdownLine(line)
 
             // Preserve an explicit empty blockquote line (`>` or `> `) as a blank line that still
             // round-trips with `>` on export.
@@ -292,862 +698,774 @@ enum NativeMarkdownCodec {
                     }
                 }
                 return true
-            }()
-            if shouldFastPathParagraph {
-                resetOrderedCounters()
-                var (combined, pendingHardBreak) = stripHardBreakMarker(line, ctx: ctx)
-                var j = i + 1
-                while j < lines.count {
-                    var nextLine = lines[j]
-                    if quoteDepth > 0 {
-                        // Keep nested blockquote levels structurally separate. Collapsing deeper quote
-                        // levels into the current paragraph flattens `> >`/`> > >` runs on export.
-                        guard let q = parseBlockquotePrefix(nextLine), q.depth == quoteDepth else { break }
-                        nextLine = q.text
-                    }
-
-                    if isBlankMarkdownLine(nextLine) { break }
-
-                    if mayStartStructuralBlockLine(nextLine) {
-                        // Stop at the next block boundary.
-                        if parseReferenceDefinition(nextLine) != nil
-                            || isMathBlockDelimiter(nextLine)
-                            || parseFenceStart(nextLine) != nil
-                            || parseHeading(nextLine) != nil
-                            || parseTask(nextLine) != nil
-                            || (options.orderedTasksEnabled && parseOrderedTask(nextLine) != nil)
-                            || parseOrdered(nextLine) != nil
-                            || parseBullet(nextLine) != nil
-                            || parseThematicBreak(nextLine) != nil
-                            || (mayBeSetextUnderlineLine(nextLine) && parseSetextUnderline(nextLine) != nil)
-                            || (canStartGfmTable(lines, startIndex: j) && parseGfmTable(lines, startIndex: j) != nil)
-                            || (canStartIndentedCode(lines, at: j, quoteDepth: quoteDepth)
-                                && parseIndentedCodeBlock(lines, startIndex: j, quoteDepth: quoteDepth) != nil)
-                        {
-                            break
-                        }
-                    }
-
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(nextLine, ctx: ctx)
-                    combined += (pendingHardBreak != nil ? "\u{2028}" : "\n") + nextText
-                    pendingHardBreak = nextHardBreak
-                    j += 1
-                }
-                if let marker = pendingHardBreak {
-                    combined += hardBreakLiteral(marker)
-                }
-
-                let para = NSMutableAttributedString(attributedString: parseInline(combined, baseFont: baseFont, ctx: ctx))
-                applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if j - 1 < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i = j
-                continue
-            }
-
-            // Reference definition: [id]: url "title"
-            if let definition = parseReferenceDefinition(line) {
-                resetOrderedCounters()
-                let visible = definition.destination
-                let para = NSMutableAttributedString(attributedString: parseInline(visible, baseFont: baseFont, ctx: ctx))
-                applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
-                if para.length > 0 {
-                    let full = NSRange(location: 0, length: para.length)
-                    para.addAttribute(.kernReferenceDefinitionID, value: definition.id, range: full)
-                    para.addAttribute(.kernReferenceDefinitionURL, value: definition.destination, range: full)
-                    if let title = definition.title {
-                        para.addAttribute(.kernReferenceDefinitionTitle, value: title, range: full)
-                    }
-                }
-                if let ctx = previousListContinuationContext(lines, before: i, quoteDepth: quoteDepth), para.length > 0 {
-                    para.addAttribute(.kernListIndent, value: max(0, ctx.indent), range: NSRange(location: 0, length: 1))
-                    para.addAttribute(.kernListDepth, value: max(0, ctx.depth), range: NSRange(location: 0, length: 1))
-                }
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i += 1
-                continue
-            }
-
-            // Math block: $$ ... $$
-            if isMathBlockDelimiter(line) {
-                resetOrderedCounters()
-
-                var mathLines: [String] = []
-                i += 1
-                while i < lines.count {
-                    var nextLine = lines[i]
-                    if quoteDepth > 0 {
-                        guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
-                        nextLine = q.text
-                    }
-                    if isMathBlockDelimiter(nextLine) {
-                        break
-                    }
-                    mathLines.append(nextLine)
-                    i += 1
-                }
-
-                if i < lines.count {
-                    var endLine = lines[i]
-                    if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
-                        endLine = q.text
-                    }
-                    if isMathBlockDelimiter(endLine) {
-                        i += 1
-                    }
-                }
-
-                let mathBody = mathLines.joined(separator: "\n")
-                let sourceMarkdown = "$$\n\(mathBody)\n$$"
-                let para = NSMutableAttributedString(
-                    attributedString: makeBlockMathAttributed(sourceMarkdown: sourceMarkdown, baseFont: baseFont)
-                )
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count {
-                    result.append(plainNewline)
-                }
-                continue
-            }
-
-            // Code block (```lang ... ``` / ~~~lang ... ~~~)
-            if let fenceContext = parseFenceStartInContext(line: line, lines: lines, index: i, quoteDepth: quoteDepth) {
-                resetOrderedCounters()
-                let blockStartIndex = i
-                let fence = fenceContext.fence
-                let listIndent = fenceContext.listIndent
-                let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
-                var codeLines: [String] = []
-                i += 1
-                while i < lines.count {
-                    var nextLine = lines[i]
-                    if quoteDepth > 0 {
-                        guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
-                        nextLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if nextLine.hasPrefix(listIndentPrefix) {
-                            nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
-                        } else if !isBlankMarkdownLine(nextLine) {
-                            break
-                        }
-                    }
-                    if isFenceEnd(nextLine, fence: fence) {
-                        break
-                    }
-                    codeLines.append(stripFenceIndent(nextLine, indent: fence.indent))
-                    i += 1
-                }
-                // Skip closing fence if present
-                if i < lines.count {
-                    var endLine = lines[i]
-                    if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
-                        endLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if endLine.hasPrefix(listIndentPrefix) {
-                            endLine = String(endLine.dropFirst(listIndentPrefix.count))
-                        }
-                    }
-                    if isFenceEnd(endLine, fence: fence) {
-                        i += 1
-                    }
-                }
-
-                let codeText = codeLines.joined(separator: "\n")
-                let strictBlockSourceMarkdown: String? = {
-                    guard options.strictConformanceRoundTripMode,
-                          blockStartIndex >= 0,
-                          i > blockStartIndex,
-                          i <= lines.count else { return nil }
-                    return lines[blockStartIndex..<i].joined(separator: "\n")
                 }()
-                var appendedBlockEndsWithNewline = false
-                if fence.language?.lowercased() == "mermaid" {
-                    let mermaidSourceMarkdown = "```mermaid\n\(codeText)\n```"
-                    let mermaidAttr = NSMutableAttributedString(
-                        attributedString: makeMermaidAttachmentAttributed(
-                            sourceMarkdown: mermaidSourceMarkdown,
-                            baseFont: baseFont,
-                            renderMode: options.mermaidRenderMode
-                        )
-                    )
-                    if let strictBlockSourceMarkdown, mermaidAttr.length > 0 {
-                        mermaidAttr.addAttribute(.kernSourceMarkdown, value: strictBlockSourceMarkdown, range: NSRange(location: 0, length: mermaidAttr.length))
-                    }
-                    applyQuoteAttributes(mermaidAttr, quoteDepth: quoteDepth)
-                    result.append(mermaidAttr)
-                    appendedBlockEndsWithNewline = mermaidAttr.string.hasSuffix("\n")
-                } else {
-                    let codeAttr = NSMutableAttributedString(
-                        attributedString: makeCodeBlockAttributed(
-                            codeText,
-                            baseFont: baseFont,
-                            infoString: fence.infoString,
-                            language: fence.language,
-                            syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled
-                        )
-                    )
-                    codeBlockCounter += 1
-                    if codeAttr.length > 0 {
-                        let full = NSRange(location: 0, length: codeAttr.length)
-                        codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
-                        codeAttr.addAttribute(.kernCodeFenceMarker, value: String(fence.marker), range: full)
-                        codeAttr.addAttribute(.kernCodeFenceLength, value: fence.length, range: full)
-                        if listIndent > 0 {
-                            codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
+                if shouldFastPathParagraph {
+                    profile(.paragraphFastPathBlock) {
+                        resetOrderedCounters()
+                        let paragraphBody = collectParagraphBody(startIndex: i, firstLine: line, quoteDepth: quoteDepth)
+                        let j = paragraphBody.nextIndex
+
+                        let para = NSMutableAttributedString(attributedString: makeInlineContent(paragraphBody, baseFont: baseFont))
+                        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if j - 1 < lines.count - 1 {
+                            result.append(plainNewline)
                         }
-                        if let strictBlockSourceMarkdown {
-                            codeAttr.addAttribute(.kernSourceMarkdown, value: strictBlockSourceMarkdown, range: full)
-                        }
+                        i = j
                     }
-                    applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
-                    result.append(codeAttr)
-                    appendedBlockEndsWithNewline = codeAttr.string.hasSuffix("\n")
-                }
-                if i < lines.count, !appendedBlockEndsWithNewline {
-                    result.append(plainNewline)
-                }
-                continue
-            }
-
-            // Indented code block (CommonMark): 4-space/tab-indented lines.
-            // It must not interrupt an open paragraph (e.g. `Foo` + `    bar`).
-            if canStartIndentedCode(lines, at: i, quoteDepth: quoteDepth),
-               let indented = parseIndentedCodeBlock(lines, startIndex: i, quoteDepth: quoteDepth) {
-                resetOrderedCounters()
-                let blockStartIndex = i
-                let codeText = indented.codeLines.joined(separator: "\n")
-                let codeAttr = NSMutableAttributedString(
-                    attributedString: makeCodeBlockAttributed(
-                        codeText,
-                        baseFont: baseFont,
-                        infoString: nil,
-                        language: nil,
-                        syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled
-                    )
-                )
-                codeBlockCounter += 1
-                if codeAttr.length > 0 {
-                    let full = NSRange(location: 0, length: codeAttr.length)
-                    codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
-                    codeAttr.addAttribute(.kernCodeFenceMarker, value: " ", range: full)
-                    codeAttr.addAttribute(.kernCodeFenceLength, value: 0, range: full)
-
-                    if let ctx = previousListContinuationContext(lines, before: i, quoteDepth: quoteDepth) {
-                        let (currentIndent, _) = parseLeadingIndent(line)
-                        if currentIndent >= ctx.indent + 4 {
-                            codeAttr.addAttribute(.kernListIndent, value: max(0, ctx.indent), range: NSRange(location: 0, length: 1))
-                            codeAttr.addAttribute(.kernListDepth, value: max(0, ctx.depth), range: NSRange(location: 0, length: 1))
-                        }
-                    }
-                    if options.strictConformanceRoundTripMode,
-                       blockStartIndex >= 0,
-                       indented.nextIndex > blockStartIndex,
-                       indented.nextIndex <= lines.count {
-                        let sourceMarkdown = lines[blockStartIndex..<indented.nextIndex].joined(separator: "\n")
-                        codeAttr.addAttribute(.kernSourceMarkdown, value: sourceMarkdown, range: full)
-                    }
-                }
-                applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
-                result.append(codeAttr)
-                i = indented.nextIndex
-                if i < lines.count, !codeAttr.string.hasSuffix("\n") {
-                    result.append(plainNewline)
-                }
-                continue
-            }
-
-            // GFM table
-            if canStartGfmTable(lines, startIndex: i),
-               let match = parseGfmTable(lines, startIndex: i) {
-                resetOrderedCounters()
-                tableCounter += 1
-                let tableID = tableCounter
-
-                // Preserve trailing newline behavior at end-of-file.
-                let terminateLastParagraph = !(match.endIndex == lines.count && !inputEndsWithNewline)
-
-                let tableAttr = makeGfmTableAttributed(
-                    match.table,
-                    tableID: tableID,
-                    baseFont: baseFont,
-                    terminateLastParagraph: terminateLastParagraph,
-                    ctx: ctx
-                )
-                result.append(tableAttr)
-                i = match.endIndex
-                continue
-            }
-
-            // Thematic break (horizontal rule)
-            if let marker = parseThematicBreak(line) {
-                resetOrderedCounters()
-                let para = NSMutableAttributedString(attributedString: makeThematicBreakAttributed(baseFont: baseFont, marker: marker))
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i += 1
-                continue
-            }
-
-            // Heading
-            if let heading = parseHeading(line) {
-                resetOrderedCounters()
-                // Kern extension: checkbox headings like `## [ ] Heading`.
-                if options.headingCheckboxesEnabled, let headingTask = parseHeadingCheckbox(heading.text) {
-                    let para = NSMutableAttributedString(attributedString: makeHeadingWithCheckbox(
-                        level: heading.level,
-                        checked: headingTask.checked,
-                        text: headingTask.text,
-                        baseFont: baseFont,
-                        ctx: ctx
-                    ))
-                    applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                    result.append(para)
-                    if i < lines.count - 1 {
-                        result.append(plainNewline)
-                    }
-                    i += 1
                     continue
                 }
 
-                let content = parseInline(heading.text, baseFont: baseFont, ctx: ctx)
-                let para = NSMutableAttributedString(attributedString: content)
-                if para.length == 0 {
-                    let placeholder = NSAttributedString(
-                        string: String(storagePlaceholderCharacter),
-                        attributes: baseAttributes(baseFont: baseFont)
-                    )
-                    para.append(placeholder)
-                    para.addAttribute(.kernPlaceholder, value: true, range: NSRange(location: 0, length: para.length))
-                }
-                applyBlockAttributes(
-                    para,
-                    kind: .heading,
-                    baseFont: baseFont,
-                    headingLevel: heading.level
-                )
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i += 1
-                continue
-            }
-
-            // Setext heading:
-            //   Heading text
-            //   ========   /   --------
-            if let setext = parseSetextHeading(lines, startIndex: i, quoteDepth: quoteDepth, options: options) {
-                resetOrderedCounters()
-                let content = parseInline(setext.text, baseFont: baseFont, ctx: ctx)
-                let para = NSMutableAttributedString(attributedString: content)
-                if para.length == 0 {
-                    let placeholder = NSAttributedString(
-                        string: String(storagePlaceholderCharacter),
-                        attributes: baseAttributes(baseFont: baseFont)
-                    )
-                    para.append(placeholder)
-                    para.addAttribute(.kernPlaceholder, value: true, range: NSRange(location: 0, length: para.length))
-                }
-                applyBlockAttributes(
-                    para,
-                    kind: .heading,
-                    baseFont: baseFont,
-                    headingLevel: setext.level
-                )
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                i = setext.nextIndex
-                if i < lines.count {
-                    result.append(plainNewline)
-                }
-                continue
-            }
-
-            // Bullet/standalone task: - [ ] text / * [ ] text / + [ ] text / [] text / [ ] text
-            if let task = parseTask(line) {
-                resetOrderedCounters()
-                var (combined, pendingHardBreak) = stripHardBreakMarker(task.text, ctx: ctx)
-                let markerWidth: Int
-                switch task.style {
-                case .bulleted:
-                    markerWidth = 1 + max(1, task.markerPadding.count)
-                case .standalone:
-                    // `[ ] ` marker width for continuation alignment.
-                    markerWidth = 4
-                }
-                let continuationIndent = String(repeating: " ", count: task.indent + markerWidth)
-
-                var j = i + 1
-                while j < lines.count {
-                    let next = lines[j]
-                    guard next.hasPrefix(continuationIndent) else { break }
-                    let stripped = String(next.dropFirst(continuationIndent.count))
-
-                    // If the next line starts a nested list item (or another block), don't treat it
-                    // as a continuation of this item's text.
-                    if parseTask(stripped) != nil
-                        || (options.orderedTasksEnabled && parseOrderedTask(stripped) != nil)
-                        || parseOrdered(stripped) != nil
-                        || parseBullet(stripped) != nil
-                        || parseHeading(stripped) != nil
-                        || parseFenceStart(stripped) != nil
-                        || stripped.hasPrefix("    ")
-                        || stripped.hasPrefix("\t")
-                    {
-                        break
+                // Reference definition: [id]: url "title"
+                if let definition = parseReferenceDefinition(line) {
+                    profile(.referenceDefinitionBlock) {
+                        resetOrderedCounters()
+                        let visible = definition.destination
+                        let para = NSMutableAttributedString(attributedString: parseInline(visible, baseFont: baseFont, ctx: ctx))
+                        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                        if para.length > 0 {
+                            let full = NSRange(location: 0, length: para.length)
+                            para.addAttribute(.kernReferenceDefinitionID, value: definition.id, range: full)
+                            para.addAttribute(.kernReferenceDefinitionURL, value: definition.destination, range: full)
+                            if let title = definition.title {
+                                para.addAttribute(.kernReferenceDefinitionTitle, value: title, range: full)
+                            }
+                        }
+                        if let ctx = previousListContinuationContext(lines, before: i, quoteDepth: quoteDepth), para.length > 0 {
+                            para.addAttribute(.kernListIndent, value: max(0, ctx.indent), range: NSRange(location: 0, length: 1))
+                            para.addAttribute(.kernListDepth, value: max(0, ctx.depth), range: NSRange(location: 0, length: 1))
+                        }
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i += 1
                     }
+                    continue
+                }
 
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
-                    if let marker = pendingHardBreak {
-                        combined += hardBreakLiteral(marker)
+                // Math block: $$ ... $$
+                if isMathBlockDelimiter(line) {
+                    profile(.mathBlock) {
+                        resetOrderedCounters()
+
+                        var mathLines: [String] = []
+                        i += 1
+                        while i < lines.count {
+                            var nextLine = lines[i]
+                            if quoteDepth > 0 {
+                                guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
+                                nextLine = q.text
+                            }
+                            if isMathBlockDelimiter(nextLine) {
+                                break
+                            }
+                            mathLines.append(nextLine)
+                            i += 1
+                        }
+
+                        if i < lines.count {
+                            var endLine = lines[i]
+                            if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
+                                endLine = q.text
+                            }
+                            if isMathBlockDelimiter(endLine) {
+                                i += 1
+                            }
+                        }
+
+                        let mathBody = mathLines.joined(separator: "\n")
+                        let sourceMarkdown = "$$\n\(mathBody)\n$$"
+                        let para = NSMutableAttributedString(
+                            attributedString: profile(.makeBlockMathAttributed) {
+                                makeBlockMathAttributed(sourceMarkdown: sourceMarkdown, baseFont: baseFont)
+                            }
+                        )
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count {
+                            result.append(plainNewline)
+                        }
                     }
-                    combined += "\u{2028}" + nextText
-                    pendingHardBreak = nextHardBreak
-                    j += 1
-                }
-                if let marker = pendingHardBreak {
-                    combined += hardBreakLiteral(marker)
+                    continue
                 }
 
-                let para = NSMutableAttributedString(attributedString: makeTaskParagraph(
-                    (task.style, task.marker, task.markerPadding, task.checked, combined),
-                    indent: task.indent,
-                    depth: task.depth,
-                    baseFont: baseFont,
-                    options: options,
-                    ctx: ctx
-                ))
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
+                // Code block (```lang ... ``` / ~~~lang ... ~~~)
+                if let fenceContext = parseFenceStartInContext(line: line, lines: lines, index: i, quoteDepth: quoteDepth) {
+                    let blockPhase: ImportProfilePhase = fenceContext.fence.language?.lowercased() == "mermaid" ? .mermaidBlock : .fencedCodeBlock
+                    profile(blockPhase) {
+                        resetOrderedCounters()
+                        let blockStartIndex = i
+                        let fence = fenceContext.fence
+                        let listIndent = fenceContext.listIndent
+                        let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
+                        var codeText = ""
+                        var appendedCodeLine = false
+                        i += 1
+                        while i < lines.count {
+                            var nextLine = lines[i]
+                            if quoteDepth > 0 {
+                                guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
+                                nextLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if nextLine.hasPrefix(listIndentPrefix) {
+                                    nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
+                                } else if !isBlankMarkdownLine(nextLine) {
+                                    break
+                                }
+                            }
+                            if isFenceEnd(nextLine, fence: fence) {
+                                break
+                            }
+                            if appendedCodeLine {
+                                codeText.append("\n")
+                            }
+                            codeText.append(stripFenceIndent(nextLine, indent: fence.indent))
+                            appendedCodeLine = true
+                            i += 1
+                        }
+                        // Skip closing fence if present
+                        if i < lines.count {
+                            var endLine = lines[i]
+                            if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
+                                endLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if endLine.hasPrefix(listIndentPrefix) {
+                                    endLine = String(endLine.dropFirst(listIndentPrefix.count))
+                                }
+                            }
+                            if isFenceEnd(endLine, fence: fence) {
+                                i += 1
+                            }
+                        }
+                        let strictBlockSourceMarkdown: String? = {
+                            guard options.strictConformanceRoundTripMode,
+                                  blockStartIndex >= 0,
+                                  i > blockStartIndex,
+                                  i <= lines.count else { return nil }
+                            return lines[blockStartIndex..<i].joined(separator: "\n")
+                        }()
+                        var appendedBlockEndsWithNewline = false
+                        if fence.language?.lowercased() == "mermaid" {
+                            let mermaidSourceMarkdown = "```mermaid\n\(codeText)\n```"
+                            let mermaidAttr = NSMutableAttributedString(
+                                attributedString: profile(.makeMermaidAttachmentAttributed) {
+                                    makeMermaidAttachmentAttributed(
+                                        sourceMarkdown: mermaidSourceMarkdown,
+                                        baseFont: baseFont,
+                                        renderMode: options.mermaidRenderMode
+                                    )
+                                }
+                            )
+                            if let strictBlockSourceMarkdown, mermaidAttr.length > 0 {
+                                mermaidAttr.addAttribute(.kernSourceMarkdown, value: strictBlockSourceMarkdown, range: NSRange(location: 0, length: mermaidAttr.length))
+                            }
+                            applyQuoteAttributes(mermaidAttr, quoteDepth: quoteDepth)
+                            result.append(mermaidAttr)
+                            appendedBlockEndsWithNewline = mermaidAttr.string.hasSuffix("\n")
+                        } else {
+                            let codeAttr = NSMutableAttributedString(
+                                attributedString: profile(.makeCodeBlockAttributed) {
+                                    makeCodeBlockAttributed(
+                                        codeText,
+                                        baseFont: baseFont,
+                                        infoString: fence.infoString,
+                                        language: fence.language,
+                                        syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled,
+                                        themeSignature: ctx.themeSignature,
+                                        profiler: ctx.profiler
+                                    )
+                                }
+                            )
+                            codeBlockCounter += 1
+                            if codeAttr.length > 0 {
+                                let full = NSRange(location: 0, length: codeAttr.length)
+                                codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
+                                codeAttr.addAttribute(.kernCodeFenceMarker, value: String(fence.marker), range: full)
+                                codeAttr.addAttribute(.kernCodeFenceLength, value: fence.length, range: full)
+                                if listIndent > 0 {
+                                    codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
+                                }
+                                if let strictBlockSourceMarkdown {
+                                    codeAttr.addAttribute(.kernSourceMarkdown, value: strictBlockSourceMarkdown, range: full)
+                                }
+                            }
+                            applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
+                            result.append(codeAttr)
+                            appendedBlockEndsWithNewline = codeAttr.string.hasSuffix("\n")
+                        }
+                        if i < lines.count, !appendedBlockEndsWithNewline {
+                            result.append(plainNewline)
+                        }
+                    }
+                    continue
                 }
-                i = j
-                continue
-            }
 
-            // Ordered task (Kern preference): 1. [ ] text
-            if options.orderedTasksEnabled, let orderedTask = parseOrderedTask(line) {
-                // Ordered tasks are a Kern option; keep them from affecting GFM ordered-list numbering.
-                if options.orderedListNumbering == .gfmDefault {
+                // Indented code block (CommonMark): 4-space/tab-indented lines.
+                // It must not interrupt an open paragraph (e.g. `Foo` + `    bar`).
+                if canStartIndentedCode(lines, at: i, quoteDepth: quoteDepth),
+                   let indented = parseIndentedCodeBlock(lines, startIndex: i, quoteDepth: quoteDepth) {
+                    profile(.indentedCodeBlock) {
+                        resetOrderedCounters()
+                        let blockStartIndex = i
+                        let codeText = indented.codeLines.joined(separator: "\n")
+                        let codeAttr = NSMutableAttributedString(
+                            attributedString: profile(.makeCodeBlockAttributed) {
+                                makeCodeBlockAttributed(
+                                    codeText,
+                                    baseFont: baseFont,
+                                    infoString: nil,
+                                    language: nil,
+                                    syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled,
+                                    themeSignature: ctx.themeSignature,
+                                    profiler: ctx.profiler
+                                )
+                            }
+                        )
+                        codeBlockCounter += 1
+                        if codeAttr.length > 0 {
+                            let full = NSRange(location: 0, length: codeAttr.length)
+                            codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
+                            codeAttr.addAttribute(.kernCodeFenceMarker, value: " ", range: full)
+                            codeAttr.addAttribute(.kernCodeFenceLength, value: 0, range: full)
+
+                            if let ctx = previousListContinuationContext(lines, before: i, quoteDepth: quoteDepth) {
+                                let (currentIndent, _) = parseLeadingIndent(line)
+                                if currentIndent >= ctx.indent + 4 {
+                                    codeAttr.addAttribute(.kernListIndent, value: max(0, ctx.indent), range: NSRange(location: 0, length: 1))
+                                    codeAttr.addAttribute(.kernListDepth, value: max(0, ctx.depth), range: NSRange(location: 0, length: 1))
+                                }
+                            }
+                            if options.strictConformanceRoundTripMode,
+                               blockStartIndex >= 0,
+                               indented.nextIndex > blockStartIndex,
+                               indented.nextIndex <= lines.count {
+                                let sourceMarkdown = lines[blockStartIndex..<indented.nextIndex].joined(separator: "\n")
+                                codeAttr.addAttribute(.kernSourceMarkdown, value: sourceMarkdown, range: full)
+                            }
+                        }
+                        applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
+                        result.append(codeAttr)
+                        i = indented.nextIndex
+                        if i < lines.count, !codeAttr.string.hasSuffix("\n") {
+                            result.append(plainNewline)
+                        }
+                    }
+                    continue
+                }
+
+                // GFM table
+                if canStartGfmTable(lines, startIndex: i),
+                   let match = parseGfmTable(lines, startIndex: i, profiler: profiler) {
+                    profile(.gfmTableBlock) {
+                        resetOrderedCounters()
+                        tableCounter += 1
+                        let tableID = tableCounter
+
+                        // Preserve trailing newline behavior at end-of-file.
+                        let terminateLastParagraph = !(match.endIndex == lines.count && !inputEndsWithNewline)
+
+                        let tableAttr = profile(.makeGfmTableAttributed) {
+                            makeGfmTableAttributed(
+                                match.table,
+                                tableID: tableID,
+                                baseFont: baseFont,
+                                terminateLastParagraph: terminateLastParagraph,
+                                ctx: ctx
+                            )
+                        }
+                        result.append(tableAttr)
+                        i = match.endIndex
+                    }
+                    continue
+                }
+
+                // Thematic break (horizontal rule)
+                if let marker = parseThematicBreak(line) {
+                    profile(.thematicBreakBlock) {
+                        resetOrderedCounters()
+                        let para = NSMutableAttributedString(attributedString: makeThematicBreakAttributed(baseFont: baseFont, marker: marker))
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i += 1
+                    }
+                    continue
+                }
+
+                // Heading
+                if let heading = parseHeading(line) {
+                    profile(.atxHeadingBlock) {
+                        resetOrderedCounters()
+                        // Kern extension: checkbox headings like `## [ ] Heading`.
+                        if options.headingCheckboxesEnabled, let headingTask = parseHeadingCheckbox(heading.text) {
+                            let containsInlineSyntax = containsInlineSyntax(in: headingTask.text)
+                            let para = NSMutableAttributedString(attributedString: makeHeadingWithCheckbox(
+                                level: heading.level,
+                                checked: headingTask.checked,
+                                text: headingTask.text,
+                                containsInlineSyntax: containsInlineSyntax,
+                                baseFont: baseFont,
+                                ctx: ctx
+                            ))
+                            applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                            result.append(para)
+                            if i < lines.count - 1 {
+                                result.append(plainNewline)
+                            }
+                            i += 1
+                            return
+                        }
+
+                        let headingBaseFont = headingFont(level: heading.level)
+                        let containsInlineSyntax = containsInlineSyntax(in: heading.text)
+                        let content = NativeMarkdownCodec.makeInlineContent(
+                            heading.text,
+                            baseFont: headingBaseFont,
+                            containsInlineSyntax: containsInlineSyntax,
+                            ctx: ctx
+                        )
+                        let para = NSMutableAttributedString(attributedString: content)
+                        if para.length == 0 {
+                            let placeholder = NSAttributedString(
+                                string: String(storagePlaceholderCharacter),
+                                attributes: baseAttributes(baseFont: headingBaseFont)
+                            )
+                            para.append(placeholder)
+                            para.addAttribute(.kernPlaceholder, value: true, range: NSRange(location: 0, length: para.length))
+                        }
+                        applyBlockAttributes(
+                            para,
+                            kind: .heading,
+                            baseFont: baseFont,
+                            headingLevel: heading.level
+                        )
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i += 1
+                    }
+                    continue
+                }
+
+                // Setext heading:
+                //   Heading text
+                //   ========   /   --------
+                if let setext = parseSetextHeading(lines, startIndex: i, quoteDepth: quoteDepth, options: options) {
+                    profile(.setextHeadingBlock) {
+                        resetOrderedCounters()
+                        let headingBaseFont = headingFont(level: setext.level)
+                        let containsInlineSyntax = containsInlineSyntax(in: setext.text)
+                        let content = NativeMarkdownCodec.makeInlineContent(
+                            setext.text,
+                            baseFont: headingBaseFont,
+                            containsInlineSyntax: containsInlineSyntax,
+                            ctx: ctx
+                        )
+                        let para = NSMutableAttributedString(attributedString: content)
+                        if para.length == 0 {
+                            let placeholder = NSAttributedString(
+                                string: String(storagePlaceholderCharacter),
+                                attributes: baseAttributes(baseFont: headingBaseFont)
+                            )
+                            para.append(placeholder)
+                            para.addAttribute(.kernPlaceholder, value: true, range: NSRange(location: 0, length: para.length))
+                        }
+                        applyBlockAttributes(
+                            para,
+                            kind: .heading,
+                            baseFont: baseFont,
+                            headingLevel: setext.level
+                        )
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        i = setext.nextIndex
+                        if i < lines.count {
+                            result.append(plainNewline)
+                        }
+                    }
+                    continue
+                }
+
+                // Bullet/standalone task: - [ ] text / * [ ] text / + [ ] text / [] text / [ ] text
+                if let task = parseTask(line) {
+                    profile(.taskListBlock) {
+                        resetOrderedCounters()
+                        let markerWidth: Int
+                        switch task.style {
+                        case .bulleted:
+                            markerWidth = 1 + max(1, task.markerPadding.count)
+                        case .standalone:
+                            // `[ ] ` marker width for continuation alignment.
+                            markerWidth = 4
+                        }
+                        let listBody = collectListBody(startIndex: i, firstLine: task.text, continuationIndent: task.indent + markerWidth)
+                        let combined = listBody.combined
+                        let j = listBody.nextIndex
+
+                        let para = NSMutableAttributedString(attributedString: makeTaskParagraph(
+                            (task.style, task.marker, task.markerPadding, task.checked, combined),
+                            indent: task.indent,
+                            depth: task.depth,
+                            baseFont: baseFont,
+                            containsInlineSyntax: listBody.containsInlineSyntax,
+                            options: options,
+                            ctx: ctx
+                        ))
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                    }
+                    continue
+                }
+
+                // Ordered task (Kern preference): 1. [ ] text
+                if options.orderedTasksEnabled, let orderedTask = parseOrderedTask(line) {
+                    profile(.orderedTaskBlock) {
+                        // Ordered tasks are a Kern option; keep them from affecting GFM ordered-list numbering.
+                        if options.orderedListNumbering == .gfmDefault {
+                            resetOrderedCounters()
+                        }
+
+                        let listBody = collectListBody(startIndex: i, firstLine: orderedTask.text, continuationIndent: orderedTask.indent + orderedTask.markerLen)
+                        let combined = listBody.combined
+                        let j = listBody.nextIndex
+
+                        let normalizedIndex: Int
+                        switch options.orderedListNumbering {
+                        case .preserveTyped:
+                            normalizedIndex = orderedTask.index
+                        case .gfmDefault:
+                            normalizedIndex = orderedTask.index
+                        }
+
+                        let para = NSMutableAttributedString(attributedString: makeOrderedTaskParagraph(
+                            (normalizedIndex, orderedTask.checked, combined),
+                            indent: orderedTask.indent,
+                            depth: orderedTask.depth,
+                            baseFont: baseFont,
+                            containsInlineSyntax: listBody.containsInlineSyntax,
+                            ctx: ctx
+                        ))
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                        if options.orderedListNumbering == .gfmDefault {
+                            resetOrderedCounters()
+                        }
+                    }
+                    continue
+                }
+
+                // When the ordered-task option is disabled, keep the ordered-task syntax as literal text.
+                // This avoids implicitly opting into non-standard Markdown behavior in the default GFM profile.
+                if !options.orderedTasksEnabled, parseOrderedTask(line) != nil {
+                    profile(.paragraphFallbackBlock) {
+                        resetOrderedCounters()
+                        let para = NSMutableAttributedString(attributedString: parseInline(line, baseFont: baseFont, ctx: ctx))
+                        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i += 1
+                    }
+                    continue
+                }
+
+                // Ordered list item whose content starts with a fenced code block (`1. ````).
+                if let ordered = parseOrdered(line), let inlineFence = parseFenceStart(ordered.text) {
+                    profile(.orderedListBlock) {
+                        let normalizedIndex: Int
+                        switch options.orderedListNumbering {
+                        case .preserveTyped:
+                            normalizedIndex = ordered.index
+                        case .gfmDefault:
+                            normalizedIndex = nextOrderedIndexGfmDefault(parsedIndex: ordered.index, depth: ordered.depth)
+                        }
+
+                        let markerPara = NSMutableAttributedString(attributedString: makeOrderedParagraph(
+                            (normalizedIndex, ordered.markerPadding, ""),
+                            indent: ordered.indent,
+                            depth: ordered.depth,
+                            baseFont: baseFont,
+                            containsInlineSyntax: false,
+                            ctx: ctx
+                        ))
+                        applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
+                        result.append(markerPara)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+
+                        let listIndent = ordered.indent + ordered.markerLen
+                        let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
+                        var codeText = ""
+                        var appendedCodeLine = false
+                        var j = i + 1
+                        while j < lines.count {
+                            var nextLine = lines[j]
+                            if quoteDepth > 0 {
+                                guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
+                                nextLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if nextLine.hasPrefix(listIndentPrefix) {
+                                    nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
+                                } else if !isBlankMarkdownLine(nextLine) {
+                                    break
+                                }
+                            }
+                            if isFenceEnd(nextLine, fence: inlineFence) {
+                                break
+                            }
+                            if appendedCodeLine {
+                                codeText.append("\n")
+                            }
+                            codeText.append(stripFenceIndent(nextLine, indent: inlineFence.indent))
+                            appendedCodeLine = true
+                            j += 1
+                        }
+                        if j < lines.count {
+                            var endLine = lines[j]
+                            if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
+                                endLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if endLine.hasPrefix(listIndentPrefix) {
+                                    endLine = String(endLine.dropFirst(listIndentPrefix.count))
+                                }
+                            }
+                            if isFenceEnd(endLine, fence: inlineFence) {
+                                j += 1
+                            }
+                        }
+                        let codeAttr = NSMutableAttributedString(
+                            attributedString: profile(.makeCodeBlockAttributed) {
+                                makeCodeBlockAttributed(
+                                    codeText,
+                                    baseFont: baseFont,
+                                    infoString: inlineFence.infoString,
+                                    language: inlineFence.language,
+                                    syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled,
+                                    themeSignature: ctx.themeSignature,
+                                    profiler: ctx.profiler
+                                )
+                            }
+                        )
+                        codeBlockCounter += 1
+                        if codeAttr.length > 0 {
+                            let full = NSRange(location: 0, length: codeAttr.length)
+                            codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
+                            codeAttr.addAttribute(.kernCodeFenceMarker, value: String(inlineFence.marker), range: full)
+                            codeAttr.addAttribute(.kernCodeFenceLength, value: inlineFence.length, range: full)
+                            codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
+                            codeAttr.addAttribute(.kernListDepth, value: max(0, ordered.depth), range: NSRange(location: 0, length: 1))
+                        }
+                        applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
+                        result.append(codeAttr)
+                        if j < lines.count, !codeAttr.string.hasSuffix("\n") {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                    }
+                    continue
+                }
+
+                // Ordered list: 1. text
+                if let ordered = parseOrdered(line) {
+                    profile(.orderedListBlock) {
+                        let listBody = collectListBody(startIndex: i, firstLine: ordered.text, continuationIndent: ordered.indent + ordered.markerLen)
+                        let combined = listBody.combined
+                        let j = listBody.nextIndex
+
+                        let normalizedIndex: Int
+                        switch options.orderedListNumbering {
+                        case .preserveTyped:
+                            normalizedIndex = ordered.index
+                        case .gfmDefault:
+                            normalizedIndex = nextOrderedIndexGfmDefault(parsedIndex: ordered.index, depth: ordered.depth)
+                        }
+
+                        let para = NSMutableAttributedString(attributedString: makeOrderedParagraph(
+                            (normalizedIndex, ordered.markerPadding, combined),
+                            indent: ordered.indent,
+                            depth: ordered.depth,
+                            baseFont: baseFont,
+                            containsInlineSyntax: listBody.containsInlineSyntax,
+                            ctx: ctx
+                        ))
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                    }
+                    continue
+                }
+
+                // Bullet list item whose content starts with a fenced code block (`- ````).
+                if let bullet = parseBullet(line), let inlineFence = parseFenceStart(bullet.text) {
+                    profile(.bulletListBlock) {
+                        resetOrderedCounters()
+
+                        let markerPara = NSMutableAttributedString(
+                            attributedString: makeBulletParagraph("", marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, containsInlineSyntax: false, ctx: ctx)
+                        )
+                        applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
+                        result.append(markerPara)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+
+                        let listIndent = bullet.indent + 1 + max(1, bullet.markerPadding.count)
+                        let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
+                        var codeText = ""
+                        var appendedCodeLine = false
+                        var j = i + 1
+                        while j < lines.count {
+                            var nextLine = lines[j]
+                            if quoteDepth > 0 {
+                                guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
+                                nextLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if nextLine.hasPrefix(listIndentPrefix) {
+                                    nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
+                                } else if !isBlankMarkdownLine(nextLine) {
+                                    break
+                                }
+                            }
+                            if isFenceEnd(nextLine, fence: inlineFence) {
+                                break
+                            }
+                            if appendedCodeLine {
+                                codeText.append("\n")
+                            }
+                            codeText.append(stripFenceIndent(nextLine, indent: inlineFence.indent))
+                            appendedCodeLine = true
+                            j += 1
+                        }
+                        if j < lines.count {
+                            var endLine = lines[j]
+                            if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
+                                endLine = q.text
+                            }
+                            if listIndent > 0 {
+                                if endLine.hasPrefix(listIndentPrefix) {
+                                    endLine = String(endLine.dropFirst(listIndentPrefix.count))
+                                }
+                            }
+                            if isFenceEnd(endLine, fence: inlineFence) {
+                                j += 1
+                            }
+                        }
+                        let codeAttr = NSMutableAttributedString(
+                            attributedString: profile(.makeCodeBlockAttributed) {
+                                makeCodeBlockAttributed(
+                                    codeText,
+                                    baseFont: baseFont,
+                                    infoString: inlineFence.infoString,
+                                    language: inlineFence.language,
+                                    syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled,
+                                    themeSignature: ctx.themeSignature,
+                                    profiler: ctx.profiler
+                                )
+                            }
+                        )
+                        codeBlockCounter += 1
+                        if codeAttr.length > 0 {
+                            let full = NSRange(location: 0, length: codeAttr.length)
+                            codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
+                            codeAttr.addAttribute(.kernCodeFenceMarker, value: String(inlineFence.marker), range: full)
+                            codeAttr.addAttribute(.kernCodeFenceLength, value: inlineFence.length, range: full)
+                            codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
+                            codeAttr.addAttribute(.kernListDepth, value: max(0, bullet.depth), range: NSRange(location: 0, length: 1))
+                        }
+                        applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
+                        result.append(codeAttr)
+                        if j < lines.count, !codeAttr.string.hasSuffix("\n") {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                    }
+                    continue
+                }
+
+                // Bullet list: - text
+                if let bullet = parseBullet(line) {
+                    profile(.bulletListBlock) {
+                        resetOrderedCounters()
+                        let listBody = collectListBody(startIndex: i, firstLine: bullet.text, continuationIndent: bullet.indent + 1 + max(1, bullet.markerPadding.count))
+                        let combined = listBody.combined
+                        let j = listBody.nextIndex
+
+                        let para = NSMutableAttributedString(
+                            attributedString: makeBulletParagraph(combined, marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, containsInlineSyntax: listBody.containsInlineSyntax, ctx: ctx)
+                        )
+                        applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                        result.append(para)
+                        if i < lines.count - 1 {
+                            result.append(plainNewline)
+                        }
+                        i = j
+                    }
+                    continue
+                }
+
+                // Plain paragraph (including empty line)
+                profile(.paragraphFallbackBlock) {
                     resetOrderedCounters()
-                }
+                    let paragraphBody = collectParagraphBody(startIndex: i, firstLine: line, quoteDepth: quoteDepth)
+                    let j = paragraphBody.nextIndex
 
-                var (combined, pendingHardBreak) = stripHardBreakMarker(orderedTask.text, ctx: ctx)
-                let continuationIndent = String(repeating: " ", count: orderedTask.indent + orderedTask.markerLen)
-                var j = i + 1
-                while j < lines.count {
-                    let next = lines[j]
-                    guard next.hasPrefix(continuationIndent) else { break }
-                    let stripped = String(next.dropFirst(continuationIndent.count))
-
-                    if parseTask(stripped) != nil
-                        || (options.orderedTasksEnabled && parseOrderedTask(stripped) != nil)
-                        || parseOrdered(stripped) != nil
-                        || parseBullet(stripped) != nil
-                        || parseHeading(stripped) != nil
-                        || parseFenceStart(stripped) != nil
-                        || stripped.hasPrefix("    ")
-                        || stripped.hasPrefix("\t")
-                    {
-                        break
+                    let para = NSMutableAttributedString(attributedString: makeInlineContent(paragraphBody, baseFont: baseFont))
+                    applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                    applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                    result.append(para)
+                    if j - 1 < lines.count - 1 {
+                        result.append(plainNewline)
                     }
-
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
-                    if let marker = pendingHardBreak {
-                        combined += hardBreakLiteral(marker)
-                    }
-                    combined += "\u{2028}" + nextText
-                    pendingHardBreak = nextHardBreak
-                    j += 1
-                }
-                if let marker = pendingHardBreak {
-                    combined += hardBreakLiteral(marker)
-                }
-
-                let normalizedIndex: Int
-                switch options.orderedListNumbering {
-                case .preserveTyped:
-                    normalizedIndex = orderedTask.index
-                case .gfmDefault:
-                    normalizedIndex = orderedTask.index
-                }
-
-                let para = NSMutableAttributedString(attributedString: makeOrderedTaskParagraph(
-                    (normalizedIndex, orderedTask.checked, combined),
-                    indent: orderedTask.indent,
-                    depth: orderedTask.depth,
-                    baseFont: baseFont,
-                    ctx: ctx
-                ))
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i = j
-                if options.orderedListNumbering == .gfmDefault {
-                    resetOrderedCounters()
+                    i = j
                 }
                 continue
             }
-
-            // When the ordered-task option is disabled, keep the ordered-task syntax as literal text.
-            // This avoids implicitly opting into non-standard Markdown behavior in the default GFM profile.
-            if !options.orderedTasksEnabled, parseOrderedTask(line) != nil {
-                resetOrderedCounters()
-                let para = NSMutableAttributedString(attributedString: parseInline(line, baseFont: baseFont, ctx: ctx))
-                applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i += 1
-                continue
-            }
-
-            // Ordered list item whose content starts with a fenced code block (`1. ````).
-            if let ordered = parseOrdered(line), let inlineFence = parseFenceStart(ordered.text) {
-                let normalizedIndex: Int
-                switch options.orderedListNumbering {
-                case .preserveTyped:
-                    normalizedIndex = ordered.index
-                case .gfmDefault:
-                    normalizedIndex = nextOrderedIndexGfmDefault(parsedIndex: ordered.index, depth: ordered.depth)
-                }
-
-                let markerPara = NSMutableAttributedString(attributedString: makeOrderedParagraph(
-                    (normalizedIndex, ordered.markerPadding, ""),
-                    indent: ordered.indent,
-                    depth: ordered.depth,
-                    baseFont: baseFont,
-                    ctx: ctx
-                ))
-                applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
-                result.append(markerPara)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-
-                let listIndent = ordered.indent + ordered.markerLen
-                let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
-                var codeLines: [String] = []
-                var j = i + 1
-                while j < lines.count {
-                    var nextLine = lines[j]
-                    if quoteDepth > 0 {
-                        guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
-                        nextLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if nextLine.hasPrefix(listIndentPrefix) {
-                            nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
-                        } else if !isBlankMarkdownLine(nextLine) {
-                            break
-                        }
-                    }
-                    if isFenceEnd(nextLine, fence: inlineFence) {
-                        break
-                    }
-                    codeLines.append(stripFenceIndent(nextLine, indent: inlineFence.indent))
-                    j += 1
-                }
-                if j < lines.count {
-                    var endLine = lines[j]
-                    if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
-                        endLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if endLine.hasPrefix(listIndentPrefix) {
-                            endLine = String(endLine.dropFirst(listIndentPrefix.count))
-                        }
-                    }
-                    if isFenceEnd(endLine, fence: inlineFence) {
-                        j += 1
-                    }
-                }
-
-                let codeText = codeLines.joined(separator: "\n")
-                let codeAttr = NSMutableAttributedString(
-                    attributedString: makeCodeBlockAttributed(
-                        codeText,
-                        baseFont: baseFont,
-                        infoString: inlineFence.infoString,
-                        language: inlineFence.language,
-                        syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled
-                    )
-                )
-                codeBlockCounter += 1
-                if codeAttr.length > 0 {
-                    let full = NSRange(location: 0, length: codeAttr.length)
-                    codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
-                    codeAttr.addAttribute(.kernCodeFenceMarker, value: String(inlineFence.marker), range: full)
-                    codeAttr.addAttribute(.kernCodeFenceLength, value: inlineFence.length, range: full)
-                    codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
-                    codeAttr.addAttribute(.kernListDepth, value: max(0, ordered.depth), range: NSRange(location: 0, length: 1))
-                }
-                applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
-                result.append(codeAttr)
-                if j < lines.count, !codeAttr.string.hasSuffix("\n") {
-                    result.append(plainNewline)
-                }
-                i = j
-                continue
-            }
-
-            // Ordered list: 1. text
-            if let ordered = parseOrdered(line) {
-                var (combined, pendingHardBreak) = stripHardBreakMarker(ordered.text, ctx: ctx)
-                let continuationIndent = String(repeating: " ", count: ordered.indent + ordered.markerLen)
-                var j = i + 1
-                while j < lines.count {
-                    let next = lines[j]
-                    guard next.hasPrefix(continuationIndent) else { break }
-                    let stripped = String(next.dropFirst(continuationIndent.count))
-
-                    if parseTask(stripped) != nil
-                        || (options.orderedTasksEnabled && parseOrderedTask(stripped) != nil)
-                        || parseOrdered(stripped) != nil
-                        || parseBullet(stripped) != nil
-                        || parseHeading(stripped) != nil
-                        || parseFenceStart(stripped) != nil
-                        || stripped.hasPrefix("    ")
-                        || stripped.hasPrefix("\t")
-                    {
-                        break
-                    }
-
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
-                    if let marker = pendingHardBreak {
-                        combined += hardBreakLiteral(marker)
-                    }
-                    combined += "\u{2028}" + nextText
-                    pendingHardBreak = nextHardBreak
-                    j += 1
-                }
-                if let marker = pendingHardBreak {
-                    combined += hardBreakLiteral(marker)
-                }
-
-                let normalizedIndex: Int
-                switch options.orderedListNumbering {
-                case .preserveTyped:
-                    normalizedIndex = ordered.index
-                case .gfmDefault:
-                    normalizedIndex = nextOrderedIndexGfmDefault(parsedIndex: ordered.index, depth: ordered.depth)
-                }
-
-                let para = NSMutableAttributedString(attributedString: makeOrderedParagraph(
-                    (normalizedIndex, ordered.markerPadding, combined),
-                    indent: ordered.indent,
-                    depth: ordered.depth,
-                    baseFont: baseFont,
-                    ctx: ctx
-                ))
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i = j
-                continue
-            }
-
-            // Bullet list item whose content starts with a fenced code block (`- ````).
-            if let bullet = parseBullet(line), let inlineFence = parseFenceStart(bullet.text) {
-                resetOrderedCounters()
-
-                let markerPara = NSMutableAttributedString(
-                    attributedString: makeBulletParagraph("", marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, ctx: ctx)
-                )
-                applyQuoteAttributes(markerPara, quoteDepth: quoteDepth)
-                result.append(markerPara)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-
-                let listIndent = bullet.indent + 1 + max(1, bullet.markerPadding.count)
-                let listIndentPrefix = listIndent > 0 ? String(repeating: " ", count: listIndent) : ""
-                var codeLines: [String] = []
-                var j = i + 1
-                while j < lines.count {
-                    var nextLine = lines[j]
-                    if quoteDepth > 0 {
-                        guard let q = parseBlockquotePrefix(nextLine), q.depth >= quoteDepth else { break }
-                        nextLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if nextLine.hasPrefix(listIndentPrefix) {
-                            nextLine = String(nextLine.dropFirst(listIndentPrefix.count))
-                        } else if !isBlankMarkdownLine(nextLine) {
-                            break
-                        }
-                    }
-                    if isFenceEnd(nextLine, fence: inlineFence) {
-                        break
-                    }
-                    codeLines.append(stripFenceIndent(nextLine, indent: inlineFence.indent))
-                    j += 1
-                }
-                if j < lines.count {
-                    var endLine = lines[j]
-                    if quoteDepth > 0, let q = parseBlockquotePrefix(endLine), q.depth >= quoteDepth {
-                        endLine = q.text
-                    }
-                    if listIndent > 0 {
-                        if endLine.hasPrefix(listIndentPrefix) {
-                            endLine = String(endLine.dropFirst(listIndentPrefix.count))
-                        }
-                    }
-                    if isFenceEnd(endLine, fence: inlineFence) {
-                        j += 1
-                    }
-                }
-
-                let codeText = codeLines.joined(separator: "\n")
-                let codeAttr = NSMutableAttributedString(
-                    attributedString: makeCodeBlockAttributed(
-                        codeText,
-                        baseFont: baseFont,
-                        infoString: inlineFence.infoString,
-                        language: inlineFence.language,
-                        syntaxHighlightingEnabled: ctx.syntaxHighlightingEnabled
-                    )
-                )
-                codeBlockCounter += 1
-                if codeAttr.length > 0 {
-                    let full = NSRange(location: 0, length: codeAttr.length)
-                    codeAttr.addAttribute(.kernCodeBlockID, value: codeBlockCounter, range: full)
-                    codeAttr.addAttribute(.kernCodeFenceMarker, value: String(inlineFence.marker), range: full)
-                    codeAttr.addAttribute(.kernCodeFenceLength, value: inlineFence.length, range: full)
-                    codeAttr.addAttribute(.kernListIndent, value: listIndent, range: NSRange(location: 0, length: 1))
-                    codeAttr.addAttribute(.kernListDepth, value: max(0, bullet.depth), range: NSRange(location: 0, length: 1))
-                }
-                applyQuoteAttributes(codeAttr, quoteDepth: quoteDepth)
-                result.append(codeAttr)
-                if j < lines.count, !codeAttr.string.hasSuffix("\n") {
-                    result.append(plainNewline)
-                }
-                i = j
-                continue
-            }
-
-            // Bullet list: - text
-            if let bullet = parseBullet(line) {
-                resetOrderedCounters()
-                var (combined, pendingHardBreak) = stripHardBreakMarker(bullet.text, ctx: ctx)
-                let continuationIndent = String(repeating: " ", count: bullet.indent + 1 + max(1, bullet.markerPadding.count))
-                var j = i + 1
-                while j < lines.count {
-                    let next = lines[j]
-                    guard next.hasPrefix(continuationIndent) else { break }
-                    let stripped = String(next.dropFirst(continuationIndent.count))
-
-                    if parseTask(stripped) != nil
-                        || (options.orderedTasksEnabled && parseOrderedTask(stripped) != nil)
-                        || parseOrdered(stripped) != nil
-                        || parseBullet(stripped) != nil
-                        || parseHeading(stripped) != nil
-                        || parseFenceStart(stripped) != nil
-                        || stripped.hasPrefix("    ")
-                        || stripped.hasPrefix("\t")
-                    {
-                        break
-                    }
-
-                    let (nextText, nextHardBreak) = stripHardBreakMarker(stripped, ctx: ctx)
-                    if let marker = pendingHardBreak {
-                        combined += hardBreakLiteral(marker)
-                    }
-                    combined += "\u{2028}" + nextText
-                    pendingHardBreak = nextHardBreak
-                    j += 1
-                }
-                if let marker = pendingHardBreak {
-                    combined += hardBreakLiteral(marker)
-                }
-
-                let para = NSMutableAttributedString(
-                    attributedString: makeBulletParagraph(combined, marker: bullet.marker, markerPadding: bullet.markerPadding, indent: bullet.indent, depth: bullet.depth, baseFont: baseFont, ctx: ctx)
-                )
-                applyQuoteAttributes(para, quoteDepth: quoteDepth)
-                result.append(para)
-                if i < lines.count - 1 {
-                    result.append(plainNewline)
-                }
-                i = j
-                continue
-            }
-
-            // Plain paragraph (including empty line)
-            resetOrderedCounters()
-            var (combined, pendingHardBreak) = stripHardBreakMarker(line, ctx: ctx)
-            var j = i + 1
-            while j < lines.count {
-                var nextLine = lines[j]
-                if quoteDepth > 0 {
-                    // Keep nested blockquote levels structurally separate. Collapsing deeper quote
-                    // levels into the current paragraph flattens `> >`/`> > >` runs on export.
-                    guard let q = parseBlockquotePrefix(nextLine), q.depth == quoteDepth else { break }
-                    nextLine = q.text
-                }
-
-                if isBlankMarkdownLine(nextLine) { break }
-
-                if mayStartStructuralBlockLine(nextLine) {
-                    // Stop at the next block boundary.
-                    if parseReferenceDefinition(nextLine) != nil
-                        || isMathBlockDelimiter(nextLine)
-                        || parseFenceStart(nextLine) != nil
-                        || parseHeading(nextLine) != nil
-                        || parseTask(nextLine) != nil
-                        || (options.orderedTasksEnabled && parseOrderedTask(nextLine) != nil)
-                        || parseOrdered(nextLine) != nil
-                        || parseBullet(nextLine) != nil
-                        || parseThematicBreak(nextLine) != nil
-                        || (mayBeSetextUnderlineLine(nextLine) && parseSetextUnderline(nextLine) != nil)
-                        || (canStartGfmTable(lines, startIndex: j) && parseGfmTable(lines, startIndex: j) != nil)
-                        || (canStartIndentedCode(lines, at: j, quoteDepth: quoteDepth)
-                            && parseIndentedCodeBlock(lines, startIndex: j, quoteDepth: quoteDepth) != nil)
-                    {
-                        break
-                    }
-                }
-
-                let (nextText, nextHardBreak) = stripHardBreakMarker(nextLine, ctx: ctx)
-                combined += (pendingHardBreak != nil ? "\u{2028}" : "\n") + nextText
-                pendingHardBreak = nextHardBreak
-                j += 1
-            }
-            if let marker = pendingHardBreak {
-                combined += hardBreakLiteral(marker)
-            }
-
-            let para = NSMutableAttributedString(attributedString: parseInline(combined, baseFont: baseFont, ctx: ctx))
-            applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
-            applyQuoteAttributes(para, quoteDepth: quoteDepth)
-            result.append(para)
-            if j - 1 < lines.count - 1 {
-                result.append(plainNewline)
-            }
-            i = j
         }
 
         return result
+    }
+
+    static func importMarkdownProfiled(
+        _ markdown: String,
+        options: Options = Options(),
+        baseURL: URL? = nil,
+        precomputedReferenceDefinitions: [String: ReferenceDefinition]? = nil
+    ) -> ProfiledImportResult {
+        let profiler = ImportProfiler()
+        let attributed = importMarkdown(
+            markdown,
+            options: options,
+            baseURL: baseURL,
+            precomputedReferenceDefinitions: precomputedReferenceDefinitions,
+            profiler: profiler
+        )
+        return ProfiledImportResult(attributed: attributed, profile: profiler.snapshot())
     }
 
     static func collectReferenceDefinitions(in markdown: String) -> [String: ReferenceDefinition] {
@@ -1225,6 +1543,9 @@ enum NativeMarkdownCodec {
         }
 
         func separatorBetween(_ previous: ExportedBlock, _ next: ExportedBlock) -> String {
+            if options.strictConformanceRoundTripMode {
+                return "\n"
+            }
             // Explicit blank paragraph blocks already encode vertical spacing.
             // Joining transitions around them with single newlines preserves authored
             // blank-line counts and prevents accidental `\n\n\n\n` expansion when
@@ -1699,7 +2020,7 @@ enum NativeMarkdownCodec {
 
     // MARK: - Tables (GFM)
 
-    private enum TableColumnAlignment: Int {
+    private enum TableColumnAlignment: Int, Hashable {
         case none = 0
         case left = 1
         case center = 2
@@ -1769,6 +2090,11 @@ enum NativeMarkdownCodec {
     /// Cache for list marker width measurements (avoids repeated CoreText layout calls).
     nonisolated(unsafe) private static var markerWidthCache: [String: CGFloat] = [:]
 
+    /// Cache for reusable paragraph styles keyed by list depth + marker geometry.
+    nonisolated(unsafe) private static var listParagraphStyleCache: [ListParagraphStyleCacheKey: NSParagraphStyle] = [:]
+    /// Cache for reusable rendered list/task marker prefixes.
+    nonisolated(unsafe) private static var listMarkerPrefixCache: [ListMarkerPrefixCacheKey: ListMarkerPrefixTemplate] = [:]
+
     private struct InlineFontCacheKey: Hashable {
         let fontName: String
         let pointSize: CGFloat
@@ -1787,10 +2113,76 @@ enum NativeMarkdownCodec {
         let themeSignature: String
     }
 
+    private struct ListParagraphStyleCacheKey: Hashable {
+        let listDepth: Int
+        let markerAdvanceTimes100: Int
+    }
+
+    private enum ListMarkerPrefixKind: Hashable {
+        case bullet
+        case taskStandalone(checked: Bool)
+        case taskBulleted(checked: Bool)
+        case ordered(marker: String, depth: Int)
+    }
+
+    private struct ListMarkerPrefixCacheKey: Hashable {
+        let kind: ListMarkerPrefixKind
+        let fontName: String
+        let pointSizeTimes100: Int
+        let themeSignature: String
+    }
+
+    private struct ListMarkerPrefixTemplate {
+        let attributed: NSAttributedString
+        let markerLength: Int
+        let markerAdvance: CGFloat
+    }
+
+    private struct CodeBlockFontCacheKey: Hashable {
+        let fontName: String
+        let pointSizeTimes100: Int
+    }
+
+    private struct HeadingParagraphStyleCacheKey: Hashable {
+        let level: Int
+    }
+
+    private struct CodeBlockParagraphStyleSet {
+        let first: NSParagraphStyle
+        let middle: NSParagraphStyle
+        let last: NSParagraphStyle
+        let single: NSParagraphStyle
+    }
+
     /// Cache for inline font trait combinations (avoids repeated NSFontManager trait conversions).
     nonisolated(unsafe) private static var inlineFontCache: [InlineFontCacheKey: NSFont] = [:]
     /// Cache for inline attribute dictionaries when no link metadata is present.
     nonisolated(unsafe) private static var inlineAttributeCache: [InlineAttributeCacheKey: [NSAttributedString.Key: Any]] = [:]
+    /// Cache for monospaced code-block fonts keyed by the source font geometry.
+    nonisolated(unsafe) private static var codeBlockFontCache: [CodeBlockFontCacheKey: NSFont] = [:]
+    /// Cache for heading paragraph styles keyed by heading level.
+    nonisolated(unsafe) private static var headingParagraphStyleCache: [HeadingParagraphStyleCacheKey: NSParagraphStyle] = [:]
+    /// Shared code-block paragraph styles; these are content-independent and safe to reuse.
+    private static let codeBlockParagraphStyles: CodeBlockParagraphStyleSet = {
+        let topSpacing = CodeBlockChromeGeometry.paragraphSpacingBefore
+        let bottomSpacing = CodeBlockChromeGeometry.paragraphSpacingAfter
+
+        func makeStyle(paragraphSpacingBefore: CGFloat, paragraphSpacing: CGFloat) -> NSParagraphStyle {
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = 12
+            style.headIndent = 12
+            style.paragraphSpacingBefore = paragraphSpacingBefore
+            style.paragraphSpacing = paragraphSpacing
+            return style.copy() as! NSParagraphStyle
+        }
+
+        return CodeBlockParagraphStyleSet(
+            first: makeStyle(paragraphSpacingBefore: topSpacing, paragraphSpacing: 0),
+            middle: makeStyle(paragraphSpacingBefore: 0, paragraphSpacing: 0),
+            last: makeStyle(paragraphSpacingBefore: 0, paragraphSpacing: bottomSpacing),
+            single: makeStyle(paragraphSpacingBefore: topSpacing, paragraphSpacing: bottomSpacing)
+        )
+    }()
     private static let cacheLock = NSLock()
 
     @inline(__always)
@@ -1798,6 +2190,22 @@ enum NativeMarkdownCodec {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return body()
+    }
+
+    static func resetCachesForTesting() {
+        withCacheLock {
+            syntaxHighlightingRegexCache.removeAll()
+            markerWidthCache.removeAll()
+            listParagraphStyleCache.removeAll()
+            listMarkerPrefixCache.removeAll()
+            inlineFontCache.removeAll()
+            inlineAttributeCache.removeAll()
+            codeBlockFontCache.removeAll()
+            headingParagraphStyleCache.removeAll()
+        }
+        sharedInlineParseCache.removeAll()
+        sharedCodeBlockAttributedCache.removeAll()
+        sharedTableAttributedCache.removeAll()
     }
 
     private static let largeDocumentPlainImportThreshold = 1_000_000
@@ -1850,7 +2258,10 @@ enum NativeMarkdownCodec {
     /// Fast blank-line test used in the importer hot path.
     /// Avoids `trimmingCharacters` allocations while preserving whitespace semantics.
     private static func isBlankMarkdownLine(_ line: String) -> Bool {
-        line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        for scalar in line.unicodeScalars where !scalar.properties.isWhitespace {
+            return false
+        }
+        return true
     }
 
     /// Quick boundary pre-check used to skip the expensive block parser cascade
@@ -1867,6 +2278,35 @@ enum NativeMarkdownCodec {
         if first.isNumber { return true }
         if line.contains("|") { return true } // table candidate
         return false
+    }
+
+    /// Fast boundary check for list/task continuation folding. This mirrors the
+    /// existing break conditions, but avoids paying the cost of the full block
+    /// parser cascade on every candidate continuation line.
+    private static func startsNestedBlockWithinListContinuation(_ line: String, options: Options) -> Bool {
+        guard !line.isEmpty, mayStartStructuralBlockLine(line) else { return false }
+        let (_, rest) = parseLeadingIndent(line)
+        guard let first = rest.first else { return false }
+
+        switch first {
+        case "#":
+            return parseHeading(line) != nil
+        case "`", "~":
+            return parseFenceStart(line) != nil
+        case "[", "-", "*", "+":
+            if parseTask(line) != nil {
+                return true
+            }
+            return parseBullet(line) != nil
+        default:
+            if first.isNumber {
+                if options.orderedTasksEnabled, parseOrderedTask(line) != nil {
+                    return true
+                }
+                return parseOrdered(line) != nil
+            }
+            return false
+        }
     }
 
     /// Setext underline candidates must start (after optional leading whitespace)
@@ -1888,76 +2328,82 @@ enum NativeMarkdownCodec {
         return header.contains("|") && delimiter.contains("|")
     }
 
-    private static func parseGfmTable(_ lines: [String], startIndex: Int) -> GfmTableMatch? {
-        guard startIndex + 1 < lines.count else { return nil }
+    private static func parseGfmTable(
+        _ lines: [String],
+        startIndex: Int,
+        profiler: ImportProfiler? = nil
+    ) -> GfmTableMatch? {
+        measureImportPhase(.parseGfmTable, profiler: profiler) {
+            guard startIndex + 1 < lines.count else { return nil }
 
-        let headerLine = lines[startIndex]
-        let delimiterLine = lines[startIndex + 1]
+            let headerLine = lines[startIndex]
+            let delimiterLine = lines[startIndex + 1]
 
-        let debug = debugTableParseEnabled
-        func dbg(_ message: String) {
-            guard debug else { return }
-            NSLog("[NativeMarkdownCodec.TableParse] %@", message)
-        }
+            let debug = debugTableParseEnabled
+            func dbg(_ message: String) {
+                guard debug else { return }
+                NSLog("[NativeMarkdownCodec.TableParse] %@", message)
+            }
 
-        // Quick heuristic: both rows must contain at least one pipe.
-        guard headerLine.contains("|"), delimiterLine.contains("|") else { return nil }
+            // Quick heuristic: both rows must contain at least one pipe.
+            guard headerLine.contains("|"), delimiterLine.contains("|") else { return nil }
 
-        let headerCells = splitGfmTableRow(headerLine)
-        let delimiterCells = splitGfmTableRow(delimiterLine)
+            let headerCells = splitGfmTableRow(headerLine)
+            let delimiterCells = splitGfmTableRow(delimiterLine)
 
-        if debug {
-            dbg("startIndex=\(startIndex) header=\(headerLine.debugDescription) delimiter=\(delimiterLine.debugDescription)")
-            dbg("headerCells=\(headerCells.map { $0.debugDescription }) delimiterCells=\(delimiterCells.map { $0.debugDescription })")
-        }
+            if debug {
+                dbg("startIndex=\(startIndex) header=\(headerLine.debugDescription) delimiter=\(delimiterLine.debugDescription)")
+                dbg("headerCells=\(headerCells.map { $0.debugDescription }) delimiterCells=\(delimiterCells.map { $0.debugDescription })")
+            }
 
-        // Tables require at least 2 columns and a delimiter count that matches header columns.
-        // This avoids false positives like:
-        // | a | b |
-        // | --- |
-        guard headerCells.count >= 2, delimiterCells.count == headerCells.count else {
-            dbg("reject: <2 columns header=\(headerCells.count) delimiter=\(delimiterCells.count)")
-            return nil
-        }
-
-        var alignments: [TableColumnAlignment] = []
-        for c in delimiterCells {
-            guard let a = parseGfmTableDelimiterCell(c) else {
-                dbg("reject: delimiter cell parse failed: \(c.debugDescription)")
+            // Tables require at least 2 columns and a delimiter count that matches header columns.
+            // This avoids false positives like:
+            // | a | b |
+            // | --- |
+            guard headerCells.count >= 2, delimiterCells.count == headerCells.count else {
+                dbg("reject: <2 columns header=\(headerCells.count) delimiter=\(delimiterCells.count)")
                 return nil
             }
-            alignments.append(a)
-        }
 
-        let columnCount = headerCells.count
-        let normalizedHeader = normalizeTableRow(headerCells, to: columnCount)
-
-        var rows: [[String]] = [normalizedHeader]
-
-        var j = startIndex + 2
-        while j < lines.count {
-            let line = lines[j]
-            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                break
+            var alignments: [TableColumnAlignment] = []
+            for c in delimiterCells {
+                guard let a = parseGfmTableDelimiterCell(c) else {
+                    dbg("reject: delimiter cell parse failed: \(c.debugDescription)")
+                    return nil
+                }
+                alignments.append(a)
             }
-            // Stop once we hit a line that doesn't look like a table row.
-            if !line.contains("|") { break }
 
-            let cells = splitGfmTableRow(line)
-            if cells.count < 2 { break }
-            rows.append(normalizeTableRow(cells, to: columnCount))
-            j += 1
+            let columnCount = headerCells.count
+            let normalizedHeader = normalizeTableRow(headerCells, to: columnCount)
+
+            var rows: [[String]] = [normalizedHeader]
+
+            var j = startIndex + 2
+            while j < lines.count {
+                let line = lines[j]
+                if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    break
+                }
+                // Stop once we hit a line that doesn't look like a table row.
+                if !line.contains("|") { break }
+
+                let cells = splitGfmTableRow(line)
+                if cells.count < 2 { break }
+                rows.append(normalizeTableRow(cells, to: columnCount))
+                j += 1
+            }
+
+            let paddedAlignments: [TableColumnAlignment] = {
+                if alignments.count >= columnCount { return Array(alignments.prefix(columnCount)) }
+                return alignments + Array(repeating: .none, count: columnCount - alignments.count)
+            }()
+
+            return GfmTableMatch(
+                table: GfmTable(rows: rows, alignments: paddedAlignments, columnCount: columnCount),
+                endIndex: j
+            )
         }
-
-        let paddedAlignments: [TableColumnAlignment] = {
-            if alignments.count >= columnCount { return Array(alignments.prefix(columnCount)) }
-            return alignments + Array(repeating: .none, count: columnCount - alignments.count)
-        }()
-
-        return GfmTableMatch(
-            table: GfmTable(rows: rows, alignments: paddedAlignments, columnCount: columnCount),
-            endIndex: j
-        )
     }
 
     private static func splitGfmTableRow(_ line: String) -> [String] {
@@ -2043,6 +2489,21 @@ enum NativeMarkdownCodec {
     }
 
     private static func makeGfmTableAttributed(_ table: GfmTable, tableID: Int, baseFont: NSFont, terminateLastParagraph: Bool, ctx: ImportContext) -> NSAttributedString {
+        let cacheKey = TableAttributedCacheKey(
+            rows: table.rows,
+            alignments: table.alignments,
+            fontName: baseFont.fontName,
+            pointSize: baseFont.pointSize,
+            terminateLastParagraph: terminateLastParagraph,
+            themeSignature: ctx.themeSignature,
+            baseURLSignature: ctx.baseURLSignature,
+            referenceDefinitionsSignature: ctx.referenceDefinitionsSignature,
+            remoteImageLoadingEnabled: ctx.options.remoteImageLoadingEnabled
+        )
+        if let cached = sharedTableAttributedCache.value(for: cacheKey) {
+            return rebindCachedTableAttributed(cached, tableID: tableID)
+        }
+
         let out = NSMutableAttributedString()
 
         let textTable = NSTextTable()
@@ -2053,6 +2514,14 @@ enum NativeMarkdownCodec {
         textTable.setContentWidth(100, type: .percentageValueType)
 
         let headerFont = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold)
+        let bodyParagraphTerminator = NSAttributedString(
+            string: "\n",
+            attributes: baseAttributes(baseFont: baseFont)
+        )
+        let headerParagraphTerminator = NSAttributedString(
+            string: "\n",
+            attributes: baseAttributes(baseFont: headerFont)
+        )
 
         let lastRowIndex = max(0, table.rows.count - 1)
         let lastColIndex = max(0, table.columnCount - 1)
@@ -2066,6 +2535,9 @@ enum NativeMarkdownCodec {
                 let cellText = c < row.count ? row[c] : ""
                 let alignment = c < table.alignments.count ? table.alignments[c] : .none
                 let font = isHeader ? headerFont : baseFont
+                let paragraphTerminator = terminates
+                    ? (isHeader ? headerParagraphTerminator : bodyParagraphTerminator)
+                    : nil
 
                 let cellPara = makeGfmTableCellParagraph(
                     text: cellText,
@@ -2077,14 +2549,33 @@ enum NativeMarkdownCodec {
                     isHeader: isHeader,
                     alignment: alignment,
                     columnCount: table.columnCount,
-                    terminatesParagraph: terminates,
+                    paragraphTerminator: paragraphTerminator,
                     ctx: ctx
                 )
                 out.append(cellPara)
             }
         }
 
+        let frozen = NSAttributedString(attributedString: out)
+        sharedTableAttributedCache.insert(frozen, for: cacheKey)
         return out
+    }
+
+    private static func rebindCachedTableAttributed(_ cached: NSAttributedString, tableID: Int) -> NSAttributedString {
+        let rebound = NSMutableAttributedString(attributedString: cached)
+        let ns = rebound.string as NSString
+        var index = 0
+        while index < ns.length {
+            let paragraphRange = ns.paragraphRange(for: NSRange(location: index, length: 0))
+            guard paragraphRange.length > 0 else { break }
+            if let kindRaw = rebound.attribute(.kernBlockKind, at: paragraphRange.location, effectiveRange: nil) as? Int,
+               let kind = KernBlockKind(rawValue: kindRaw),
+               kind == .tableCell {
+                rebound.addAttribute(.kernTableID, value: tableID, range: paragraphRange)
+            }
+            index = paragraphRange.location + paragraphRange.length
+        }
+        return rebound
     }
 
     private static func makeGfmTableCellParagraph(
@@ -2097,17 +2588,9 @@ enum NativeMarkdownCodec {
         isHeader: Bool,
         alignment: TableColumnAlignment,
         columnCount: Int,
-        terminatesParagraph: Bool,
+        paragraphTerminator: NSAttributedString?,
         ctx: ImportContext
     ) -> NSAttributedString {
-        let para = NSMutableAttributedString()
-
-        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
-
-        if terminatesParagraph {
-            para.append(NSAttributedString(string: "\n", attributes: baseAttributes(baseFont: baseFont)))
-        }
-
         let block = NSTextTableBlock(table: table, startingRow: row, rowSpan: 1, startingColumn: column, columnSpan: 1)
         block.verticalAlignment = .topAlignment
         block.setWidth(6, type: .absoluteValueType, for: .padding)
@@ -2123,15 +2606,31 @@ enum NativeMarkdownCodec {
         style.paragraphSpacing = 0
         style.alignment = alignment.textAlignment
 
+        let para = NSMutableAttributedString()
+        if text.isEmpty {
+            // Empty cells are common in benchmark fixtures; skip parseInline and materialize only
+            // the paragraph terminator/bounds chrome when the cell has no content.
+        } else if !containsInlineSyntax(in: text) {
+            para.append(makeInlineAttributed(text, baseFont: baseFont, style: InlineStyle()))
+        } else {
+            para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
+        }
+
+        if let paragraphTerminator {
+            para.append(paragraphTerminator)
+        }
+
         let full = NSRange(location: 0, length: para.length)
-        para.addAttribute(.paragraphStyle, value: style, range: full)
-        para.addAttribute(.kernBlockKind, value: KernBlockKind.tableCell.rawValue, range: full)
-        para.addAttribute(.kernTableID, value: tableID, range: full)
-        para.addAttribute(.kernTableRow, value: row, range: full)
-        para.addAttribute(.kernTableColumn, value: column, range: full)
-        para.addAttribute(.kernTableIsHeader, value: isHeader, range: full)
-        para.addAttribute(.kernTableColumnAlignment, value: alignment.rawValue, range: full)
-        para.addAttribute(.kernTableColumnCount, value: columnCount, range: full)
+        para.addAttributes([
+            .paragraphStyle: style,
+            .kernBlockKind: KernBlockKind.tableCell.rawValue,
+            .kernTableID: tableID,
+            .kernTableRow: row,
+            .kernTableColumn: column,
+            .kernTableIsHeader: isHeader,
+            .kernTableColumnAlignment: alignment.rawValue,
+            .kernTableColumnCount: columnCount
+        ], range: full)
 
         return para
     }
@@ -2708,39 +3207,41 @@ enum NativeMarkdownCodec {
         let (indent, rest) = parseLeadingIndent(line)
 
         // Standard: "- [ ] "
-        if let marker = rest.first, ["-", "*", "+"].contains(marker) {
+        if let marker = rest.first, marker == "-" || marker == "*" || marker == "+" {
             let afterMarker = rest.dropFirst()
             guard let ws = afterMarker.first, ws == " " || ws == "\t" else { /* not a list marker */ return nil }
             let padding = String(afterMarker.prefix(while: { $0 == " " || $0 == "\t" }))
             let afterWS = afterMarker.drop(while: { $0 == " " || $0 == "\t" })
-            guard afterWS.hasPrefix("["), afterWS.count >= 3 else { return nil }
-            let chars = Array(afterWS)
-            guard chars.count >= 3, chars[0] == "[", chars[2] == "]" else { return nil }
-            let checkedChar = chars[1]
+            guard let open = afterWS.first, open == "[" else { return nil }
+            let checkedIndex = afterWS.index(after: afterWS.startIndex)
+            guard checkedIndex < afterWS.endIndex else { return nil }
+            let closeIndex = afterWS.index(after: checkedIndex)
+            guard closeIndex < afterWS.endIndex, afterWS[closeIndex] == "]" else { return nil }
+            let checkedChar = afterWS[checkedIndex]
             let checked = checkedChar == "x" || checkedChar == "X"
             // Allow empty task text (`- [ ]`), otherwise require whitespace after closing bracket.
-            if chars.count > 3, chars[3] != " ", chars[3] != "\t" {
+            let spacingIndex = afterWS.index(after: closeIndex)
+            if spacingIndex < afterWS.endIndex, afterWS[spacingIndex] != " ", afterWS[spacingIndex] != "\t" {
                 return nil
             }
-            let text = chars.count > 3
-                ? String(afterWS.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            let text = spacingIndex < afterWS.endIndex
+                ? String(afterWS[afterWS.index(after: spacingIndex)...]).trimmingCharacters(in: .whitespaces)
                 : ""
             let depth = indent / 2
             return (indent, depth, .bulleted, marker, padding, checked, text)
         }
 
         // Shortcut: "[] " / "[ ] " / "[x] "
-        let trimmed = String(rest)
-        if trimmed.hasPrefix("[] ") {
-            let text = String(trimmed.dropFirst(3))
+        if rest.hasPrefix("[] ") {
+            let text = String(rest.dropFirst(3))
             return (indent, 0, .standalone, nil, "", false, text)
         }
-        if trimmed.hasPrefix("[ ] ") {
-            let text = String(trimmed.dropFirst(4))
+        if rest.hasPrefix("[ ] ") {
+            let text = String(rest.dropFirst(4))
             return (indent, 0, .standalone, nil, "", false, text)
         }
-        if trimmed.hasPrefix("[x] ") || trimmed.hasPrefix("[X] ") {
-            let text = String(trimmed.dropFirst(4))
+        if rest.hasPrefix("[x] ") || rest.hasPrefix("[X] ") {
+            let text = String(rest.dropFirst(4))
             return (indent, 0, .standalone, nil, "", true, text)
         }
 
@@ -2749,7 +3250,7 @@ enum NativeMarkdownCodec {
 
     private static func parseBullet(_ line: String) -> (indent: Int, depth: Int, marker: Character, markerPadding: String, text: String)? {
         let (indent, rest) = parseLeadingIndent(line)
-        guard let marker = rest.first, ["-", "*", "+"].contains(marker) else { return nil }
+        guard let marker = rest.first, marker == "-" || marker == "*" || marker == "+" else { return nil }
         let afterMarker = rest.dropFirst()
         if afterMarker.isEmpty {
             let depth = indent / 2
@@ -2765,17 +3266,16 @@ enum NativeMarkdownCodec {
     private static func parseOrdered(_ line: String) -> (indent: Int, depth: Int, index: Int, markerPadding: String, text: String, markerLen: Int)? {
         // Minimal: "1. text" (digits + '.' + whitespace)
         let (indent, rest) = parseLeadingIndent(line)
-        var digits = ""
-        for ch in rest {
-            if ch.isNumber {
-                digits.append(ch)
-            } else {
-                break
-            }
+        var digitCount = 0
+        var n = 0
+        var idx = rest.startIndex
+        while idx < rest.endIndex, let value = rest[idx].wholeNumberValue {
+            n = (n * 10) + value
+            digitCount += 1
+            idx = rest.index(after: idx)
         }
-        guard !digits.isEmpty else { return nil }
-        guard let n = Int(digits) else { return nil }
-        let dotIndex = rest.index(rest.startIndex, offsetBy: digits.count)
+        guard digitCount > 0 else { return nil }
+        let dotIndex = idx
         guard dotIndex < rest.endIndex, rest[dotIndex] == "." else { return nil }
         let afterDot = rest.index(after: dotIndex)
         guard afterDot <= rest.endIndex else { return nil }
@@ -2785,14 +3285,14 @@ enum NativeMarkdownCodec {
         if afterDot == rest.endIndex {
             markerPadding = ""
             text = ""
-            markerLen = digits.count + 2 // "." + implied single-space continuation
+            markerLen = digitCount + 2 // "." + implied single-space continuation
         } else {
             guard rest[afterDot] == " " || rest[afterDot] == "\t" else { return nil }
             let paddingSlice = rest[afterDot...].prefix(while: { $0 == " " || $0 == "\t" })
             markerPadding = String(paddingSlice)
             let textStart = rest.index(afterDot, offsetBy: paddingSlice.count)
             text = String(rest[textStart...])
-            markerLen = digits.count + 1 + paddingSlice.count // "." + marker padding
+            markerLen = digitCount + 1 + paddingSlice.count // "." + marker padding
         }
         let depth = indent / 3
         return (indent, depth, n, markerPadding, text, markerLen)
@@ -2801,24 +3301,31 @@ enum NativeMarkdownCodec {
     private static func parseOrderedTask(_ line: String) -> (indent: Int, depth: Int, index: Int, checked: Bool, text: String, markerLen: Int)? {
         // Minimal: "1. [ ] text" (digits + '.' + whitespace + '[' + (' '|'x') + ']' + whitespace)
         let (indent, rest) = parseLeadingIndent(line)
-        var digits = ""
-        for ch in rest {
-            if ch.isNumber { digits.append(ch) } else { break }
+        var digitCount = 0
+        var n = 0
+        var idx = rest.startIndex
+        while idx < rest.endIndex, let value = rest[idx].wholeNumberValue {
+            n = (n * 10) + value
+            digitCount += 1
+            idx = rest.index(after: idx)
         }
-        guard !digits.isEmpty else { return nil }
-        guard let n = Int(digits) else { return nil }
-        let chars = Array(rest)
-        let prefixLen = digits.count
-        guard chars.count >= prefixLen + 6 else { return nil }
-        guard chars[prefixLen] == "." else { return nil }
-        guard chars[prefixLen + 1] == " " || chars[prefixLen + 1] == "\t" else { return nil }
-        guard chars[prefixLen + 2] == "[", chars[prefixLen + 4] == "]" else { return nil }
-        let checkedChar = chars[prefixLen + 3]
+        guard digitCount > 0 else { return nil }
+        guard idx < rest.endIndex, rest[idx] == "." else { return nil }
+        idx = rest.index(after: idx)
+        guard idx < rest.endIndex, rest[idx] == " " || rest[idx] == "\t" else { return nil }
+        idx = rest.index(after: idx)
+        guard idx < rest.endIndex, rest[idx] == "[" else { return nil }
+        let checkedIndex = rest.index(after: idx)
+        guard checkedIndex < rest.endIndex else { return nil }
+        let closeIndex = rest.index(after: checkedIndex)
+        guard closeIndex < rest.endIndex, rest[closeIndex] == "]" else { return nil }
+        let checkedChar = rest[checkedIndex]
         let checked = checkedChar == "x" || checkedChar == "X"
-        guard chars[prefixLen + 5] == " " || chars[prefixLen + 5] == "\t" else { return nil }
-        let text = String(chars.dropFirst(prefixLen + 6))
+        let spacingIndex = rest.index(after: closeIndex)
+        guard spacingIndex < rest.endIndex, rest[spacingIndex] == " " || rest[spacingIndex] == "\t" else { return nil }
+        let text = String(rest[rest.index(after: spacingIndex)...])
         let depth = indent / 3
-        let markerLen = prefixLen + 2
+        let markerLen = digitCount + 2
         return (indent, depth, n, checked, text, markerLen)
     }
 
@@ -2842,33 +3349,22 @@ enum NativeMarkdownCodec {
         indent: Int,
         depth: Int,
         baseFont: NSFont,
+        containsInlineSyntax: Bool,
         options: Options,
         ctx: ImportContext
     ) -> NSAttributedString {
         let para = NSMutableAttributedString()
-
-        // Marker prefix: checkbox + " " (and optional bullet dot for bulleted task items).
-        let markerAttrs = baseAttributes(baseFont: baseFont).merging(
-            [.kernMarker: true],
-            uniquingKeysWith: { $1 }
+        let markerTemplate = listMarkerPrefixTemplate(
+            kind: task.style == .bulleted && options.taskRendering == .kern
+                ? .taskBulleted(checked: task.checked)
+                : .taskStandalone(checked: task.checked),
+            baseFont: baseFont
         )
+        para.append(markerTemplate.attributed)
+        let markerLength = markerTemplate.markerLength
+        attachMarkerAdvance(markerTemplate.markerAdvance, to: para)
 
-        if task.style == .bulleted, options.taskRendering == .kern {
-            para.append(NSAttributedString(string: "• ", attributes: markerAttrs))
-        }
-
-        // Slightly larger checkbox for Notion-like visual balance at 16pt base font.
-        let checkboxFont = CheckboxStyle.preferredFont(pointSize: baseFont.pointSize + 4)
-        let checkboxChar = task.checked ? "\u{2611}" : "\u{2610}" // ☑ / ☐
-        var checkboxAttrs = markerAttrs
-        checkboxAttrs[.font] = checkboxFont
-        checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
-        checkboxAttrs[.kernCheckbox] = true
-        checkboxAttrs[.kernCheckboxChecked] = task.checked
-        para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
-        para.append(NSAttributedString(string: " ", attributes: markerAttrs))
-
-        let content = parseInline(task.text, baseFont: baseFont, ctx: ctx)
+        let content = makeInlineContent(task.text, baseFont: baseFont, containsInlineSyntax: containsInlineSyntax, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
@@ -2881,8 +3377,7 @@ enum NativeMarkdownCodec {
         }
 
         if task.checked {
-            let markerLen = markerPrefixLength(in: para)
-            let range = NSRange(location: markerLen, length: max(0, para.length - markerLen))
+            let range = NSRange(location: markerLength, length: max(0, para.length - markerLength))
             if range.length > 0 {
                 para.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
             }
@@ -2890,7 +3385,14 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeHeadingWithCheckbox(level: Int, checked: Bool, text: String, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
+    private static func makeHeadingWithCheckbox(
+        level: Int,
+        checked: Bool,
+        text: String,
+        containsInlineSyntax: Bool,
+        baseFont: NSFont,
+        ctx: ImportContext
+    ) -> NSAttributedString {
         let para = NSMutableAttributedString()
 
         let heading = headingFont(level: level)
@@ -2913,7 +3415,7 @@ enum NativeMarkdownCodec {
         para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
         para.append(NSAttributedString(string: " ", attributes: markerAttrs))
 
-        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
+        para.append(makeInlineContent(text, baseFont: heading, containsInlineSyntax: containsInlineSyntax, ctx: ctx))
 
         applyBlockAttributes(para, kind: .heading, baseFont: baseFont, headingLevel: max(1, min(6, level)))
 
@@ -2928,14 +3430,12 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeBulletParagraph(_ text: String, marker: Character, markerPadding: String, indent: Int, depth: Int, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
+    private static func makeBulletParagraph(_ text: String, marker: Character, markerPadding: String, indent: Int, depth: Int, baseFont: NSFont, containsInlineSyntax: Bool, ctx: ImportContext) -> NSAttributedString {
         let para = NSMutableAttributedString()
-        let markerAttrs = baseAttributes(baseFont: baseFont).merging(
-            [.kernMarker: true],
-            uniquingKeysWith: { $1 }
-        )
-        para.append(NSAttributedString(string: "• ", attributes: markerAttrs))
-        para.append(parseInline(text, baseFont: baseFont, ctx: ctx))
+        let markerTemplate = listMarkerPrefixTemplate(kind: .bullet, baseFont: baseFont)
+        para.append(markerTemplate.attributed)
+        attachMarkerAdvance(markerTemplate.markerAdvance, to: para)
+        para.append(makeInlineContent(text, baseFont: baseFont, containsInlineSyntax: containsInlineSyntax, ctx: ctx))
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernListDepth, value: max(0, depth), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernBulletMarker, value: String(marker), range: NSRange(location: 0, length: min(1, para.length)))
@@ -2949,14 +3449,31 @@ enum NativeMarkdownCodec {
         baseFont: NSFont,
         infoString: String?,
         language: String?,
-        syntaxHighlightingEnabled: Bool
+        syntaxHighlightingEnabled: Bool,
+        themeSignature: String,
+        profiler: ImportProfiler? = nil
     ) -> NSAttributedString {
+        let normalizedInfoString = infoString ?? ""
+        let normalizedLanguage = language ?? ""
+        let cacheKey = CodeBlockAttributedCacheKey(
+            code: code,
+            infoString: normalizedInfoString,
+            language: normalizedLanguage,
+            fontName: baseFont.fontName,
+            pointSize: baseFont.pointSize,
+            syntaxHighlightingEnabled: syntaxHighlightingEnabled,
+            themeSignature: NativeEditorAppearance.appearanceCacheSignature()
+        )
+        if let cached = sharedCodeBlockAttributedCache.value(for: cacheKey) {
+            return cached
+        }
+
         let storedCode = code.isEmpty ? String(storagePlaceholderCharacter) : code
         let para = NSMutableAttributedString(string: storedCode, attributes: baseAttributes(baseFont: baseFont))
         if code.isEmpty, para.length > 0 {
             para.addAttribute(.kernPlaceholder, value: true, range: NSRange(location: 0, length: para.length))
         }
-        let codeFont = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+        let codeFont = cachedCodeBlockFont(baseFont: baseFont)
         para.addAttribute(.font, value: codeFont, range: NSRange(location: 0, length: para.length))
         para.addAttribute(.kernBlockKind, value: KernBlockKind.codeBlock.rawValue, range: NSRange(location: 0, length: para.length))
 
@@ -2966,91 +3483,83 @@ enum NativeMarkdownCodec {
         //   (which would create large gaps between every line).
         if para.length > 0 {
             let ns = para.string as NSString
-            var ranges: [NSRange] = []
             var idx = 0
+            var firstRange: NSRange?
+            var pendingRange: NSRange?
+
             while idx < ns.length {
-                let r = ns.paragraphRange(for: NSRange(location: idx, length: 0))
-                guard r.length > 0 else { break }
-                ranges.append(r)
-                idx = r.location + r.length
+                let paragraphRange = ns.paragraphRange(for: NSRange(location: idx, length: 0))
+                guard paragraphRange.length > 0 else { break }
+
+                if let pendingRange {
+                    let style = (firstRange?.location == pendingRange.location)
+                        ? codeBlockParagraphStyles.first
+                        : codeBlockParagraphStyles.middle
+                    para.addAttribute(.paragraphStyle, value: style, range: pendingRange)
+                } else {
+                    firstRange = paragraphRange
+                }
+
+                pendingRange = paragraphRange
+                idx = paragraphRange.location + paragraphRange.length
             }
 
-            // Keep code blocks compact, but leave enough external spacing so neighboring rounded
-            // backgrounds do not overlap with each other or headings.
-            let topSpacing: CGFloat = 10
-            let bottomSpacing: CGFloat = 10
-
-            let firstStyle: NSParagraphStyle = {
-                let style = NSMutableParagraphStyle()
-                style.firstLineHeadIndent = 12
-                style.headIndent = 12
-                style.paragraphSpacingBefore = topSpacing
-                style.paragraphSpacing = 0
-                return style
-            }()
-            let middleStyle: NSParagraphStyle = {
-                let style = NSMutableParagraphStyle()
-                style.firstLineHeadIndent = 12
-                style.headIndent = 12
-                style.paragraphSpacingBefore = 0
-                style.paragraphSpacing = 0
-                return style
-            }()
-            let lastStyle: NSParagraphStyle = {
-                let style = NSMutableParagraphStyle()
-                style.firstLineHeadIndent = 12
-                style.headIndent = 12
-                style.paragraphSpacingBefore = 0
-                style.paragraphSpacing = bottomSpacing
-                return style
-            }()
-            let singleStyle: NSParagraphStyle = {
-                let style = NSMutableParagraphStyle()
-                style.firstLineHeadIndent = 12
-                style.headIndent = 12
-                style.paragraphSpacingBefore = topSpacing
-                style.paragraphSpacing = bottomSpacing
-                return style
-            }()
-
-            for (i, r) in ranges.enumerated() {
-                let paragraphStyle: NSParagraphStyle
-                if ranges.count == 1 {
-                    paragraphStyle = singleStyle
-                } else if i == 0 {
-                    paragraphStyle = firstStyle
-                } else if i == ranges.count - 1 {
-                    paragraphStyle = lastStyle
+            if let pendingRange {
+                let style: NSParagraphStyle
+                if firstRange?.location == pendingRange.location {
+                    style = codeBlockParagraphStyles.single
                 } else {
-                    paragraphStyle = middleStyle
+                    style = codeBlockParagraphStyles.last
                 }
-                para.addAttribute(.paragraphStyle, value: paragraphStyle, range: r)
+                para.addAttribute(.paragraphStyle, value: style, range: pendingRange)
             }
         }
 
-        if let infoString, !infoString.isEmpty, para.length > 0 {
-            para.addAttribute(.kernCodeFenceInfoString, value: infoString, range: NSRange(location: 0, length: 1))
+        if !normalizedInfoString.isEmpty, para.length > 0 {
+            para.addAttribute(.kernCodeFenceInfoString, value: normalizedInfoString, range: NSRange(location: 0, length: 1))
         }
 
         // Language is used for chrome and best-effort syntax highlighting.
-        if let language, !language.isEmpty {
+        if !normalizedLanguage.isEmpty {
             // Store on a kern.* attribute so export and UI can access it reliably.
             if para.length > 0 {
-                para.addAttribute(.kernCodeLanguage, value: language, range: NSRange(location: 0, length: 1))
+                para.addAttribute(.kernCodeLanguage, value: normalizedLanguage, range: NSRange(location: 0, length: 1))
             }
 
             // Back-compat: we used to stash the info string in a tooltip-like attribute.
-            let toolTipInfo = (infoString?.isEmpty == false ? infoString! : language)
+            let toolTipInfo = (!normalizedInfoString.isEmpty ? normalizedInfoString : normalizedLanguage)
             para.addAttribute(.toolTip, value: "```\(toolTipInfo)", range: NSRange(location: 0, length: min(1, para.length)))
 
             if syntaxHighlightingEnabled {
-                applySyntaxHighlighting(para, language: language)
+                measureImportPhase(.applySyntaxHighlighting, profiler: profiler) {
+                    applySyntaxHighlighting(para, language: normalizedLanguage)
+                }
             }
-        } else if let infoString, !infoString.isEmpty {
-            para.addAttribute(.toolTip, value: "```\(infoString)", range: NSRange(location: 0, length: min(1, para.length)))
+        } else if !normalizedInfoString.isEmpty {
+            para.addAttribute(.toolTip, value: "```\(normalizedInfoString)", range: NSRange(location: 0, length: min(1, para.length)))
         }
 
-        return para
+        let frozen = NSAttributedString(attributedString: para)
+        sharedCodeBlockAttributedCache.insert(frozen, for: cacheKey)
+        return frozen
+    }
+
+    private static func cachedCodeBlockFont(baseFont: NSFont) -> NSFont {
+        let key = CodeBlockFontCacheKey(
+            fontName: baseFont.fontName,
+            pointSizeTimes100: Int((baseFont.pointSize * 100).rounded())
+        )
+        if let cached = withCacheLock({ codeBlockFontCache[key] }) {
+            return cached
+        }
+        let created = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+        return withCacheLock {
+            if let cached = codeBlockFontCache[key] {
+                return cached
+            }
+            codeBlockFontCache[key] = created
+            return created
+        }
     }
 
     private static func makeBlockMathAttributed(sourceMarkdown: String, baseFont: NSFont) -> NSAttributedString {
@@ -3097,13 +3606,23 @@ enum NativeMarkdownCodec {
             out.addAttribute(.font, value: baseFont, range: full)
             out.addAttribute(.kernSourceMarkdown, value: sourceMarkdown, range: full)
             out.addAttribute(.kernAttachmentKind, value: "image", range: full)
-            if let resolvedURL = attachment.resolvedURL {
+            if let resolvedURL = attachment.resolvedURL,
+               !(!ctx.options.remoteImageLoadingEnabled && isRemoteHTTPURL(resolvedURL))
+            {
                 out.addAttribute(.link, value: resolvedURL, range: full)
-            } else if let absoluteURL = URL(string: destination), absoluteURL.scheme != nil {
+            } else if let absoluteURL = URL(string: destination),
+                      let scheme = absoluteURL.scheme?.lowercased(),
+                      (scheme == "http" || scheme == "https"),
+                      ctx.options.remoteImageLoadingEnabled {
                 out.addAttribute(.link, value: absoluteURL, range: full)
             }
         }
         return out
+    }
+
+    private static func isRemoteHTTPURL(_ url: URL) -> Bool {
+        guard !url.isFileURL, let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 
     private static func makeInlineMathAttributed(expression: String, sourceMarkdown: String, baseFont: NSFont) -> NSAttributedString {
@@ -3405,25 +3924,20 @@ enum NativeMarkdownCodec {
         return para
     }
 
-    private static func makeOrderedParagraph(_ ordered: (index: Int, markerPadding: String, text: String), indent: Int, depth: Int, baseFont: NSFont, ctx: ImportContext) -> NSAttributedString {
+    private static func makeOrderedParagraph(_ ordered: (index: Int, markerPadding: String, text: String), indent: Int, depth: Int, baseFont: NSFont, containsInlineSyntax: Bool, ctx: ImportContext) -> NSAttributedString {
         let para = NSMutableAttributedString()
-
-        var markerAttrs = baseAttributes(baseFont: baseFont).merging(
-            [.kernMarker: true],
-            uniquingKeysWith: { $1 }
-        )
-        markerAttrs[.font] = orderedMarkerFont(baseFont: baseFont, depth: depth)
-
         let marker = orderedDisplayMarker(index: max(0, ordered.index), depth: depth)
-        para.append(NSAttributedString(string: marker, attributes: markerAttrs))
-        let content = parseInline(ordered.text, baseFont: baseFont, ctx: ctx)
+        let markerTemplate = listMarkerPrefixTemplate(kind: .ordered(marker: marker, depth: depth), baseFont: baseFont)
+        para.append(markerTemplate.attributed)
+        attachMarkerAdvance(markerTemplate.markerAdvance, to: para)
+        let content = makeInlineContent(ordered.text, baseFont: baseFont, containsInlineSyntax: containsInlineSyntax, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernListDepth, value: max(0, depth), range: NSRange(location: 0, length: min(1, para.length)))
         para.addAttribute(.kernListMarkerPadding, value: ordered.markerPadding, range: NSRange(location: 0, length: min(1, para.length)))
         applyBlockAttributes(para, kind: .ordered, baseFont: baseFont, headingLevel: nil)
-        para.addAttribute(.kernOrderedIndex, value: max(0, ordered.index), range: NSRange(location: 0, length: min(marker.count, para.length)))
+        para.addAttribute(.kernOrderedIndex, value: max(0, ordered.index), range: NSRange(location: 0, length: min(markerTemplate.markerLength, para.length)))
 
         return para
     }
@@ -3490,6 +4004,7 @@ enum NativeMarkdownCodec {
         indent: Int,
         depth: Int,
         baseFont: NSFont,
+        containsInlineSyntax: Bool,
         ctx: ImportContext
     ) -> NSAttributedString {
         let para = NSMutableAttributedString()
@@ -3512,8 +4027,10 @@ enum NativeMarkdownCodec {
         checkboxAttrs[.kernCheckboxChecked] = orderedTask.checked
         para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
         para.append(NSAttributedString(string: " ", attributes: markerAttrs))
+        let markerLength = para.length
+        attachMarkerAdvance(measuredMarkerAdvance(in: para, markerLength: markerLength), to: para)
 
-        let content = parseInline(orderedTask.text, baseFont: baseFont, ctx: ctx)
+        let content = makeInlineContent(orderedTask.text, baseFont: baseFont, containsInlineSyntax: containsInlineSyntax, ctx: ctx)
         para.append(content)
 
         para.addAttribute(.kernListIndent, value: max(0, indent), range: NSRange(location: 0, length: min(1, para.length)))
@@ -3523,8 +4040,7 @@ enum NativeMarkdownCodec {
         para.addAttribute(.kernOrderedIsTask, value: true, range: NSRange(location: 0, length: min(1, para.length)))
 
         if orderedTask.checked {
-            let markerLen = markerPrefixLength(in: para)
-            let range = NSRange(location: markerLen, length: max(0, para.length - markerLen))
+            let range = NSRange(location: markerLength, length: max(0, para.length - markerLength))
             if range.length > 0 {
                 para.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
             }
@@ -3546,37 +4062,7 @@ enum NativeMarkdownCodec {
         case .heading:
             let level = headingLevel ?? 1
             paragraph.addAttribute(.kernHeadingLevel, value: level, range: full)
-
-            // Apply heading font to the content only (skip marker prefix so checkbox glyphs keep
-            // their own font metrics for consistent alignment).
-            let font = headingFont(level: level)
-            let markerLen = markerPrefixLength(in: paragraph)
-            let contentRange = NSRange(location: markerLen, length: max(0, paragraph.length - markerLen))
-            if contentRange.length > 0 {
-                paragraph.enumerateAttributes(in: contentRange, options: []) { attrs, subrange, _ in
-                    let strong = (attrs[.kernStrong] as? Bool) ?? false
-                    let emphasis = (attrs[.kernEmphasis] as? Bool) ?? false
-                    let code = (attrs[.kernInlineCode] as? Bool) ?? false
-                    var resolvedFont = font
-                    if code {
-                        resolvedFont = NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
-                    } else {
-                        if strong {
-                            resolvedFont = NSFontManager.shared.convert(resolvedFont, toHaveTrait: .boldFontMask)
-                        }
-                        if emphasis {
-                            resolvedFont = NSFontManager.shared.convert(resolvedFont, toHaveTrait: .italicFontMask)
-                        }
-                    }
-                    paragraph.addAttribute(.font, value: resolvedFont, range: subrange)
-                }
-            }
-
-            let style = NSMutableParagraphStyle()
-            style.paragraphSpacingBefore = level == 1 ? 14 : 10
-            style.paragraphSpacing = 6
-            style.lineHeightMultiple = 1.12
-            paragraph.addAttribute(.paragraphStyle, value: style, range: full)
+            paragraph.addAttribute(.paragraphStyle, value: headingParagraphStyle(level: level), range: full)
 
         case .codeBlock:
             break
@@ -3597,39 +4083,15 @@ enum NativeMarkdownCodec {
             paragraph.addAttribute(.paragraphStyle, value: style, range: full)
 
         case .bullet, .task, .ordered, .paragraph:
-            let style = NSMutableParagraphStyle()
-            style.paragraphSpacingBefore = 5
-            style.paragraphSpacing = 5
-            style.lineHeightMultiple = 1.12
-
             let listDepth = (paragraph.attribute(.kernListDepth, at: 0, effectiveRange: nil) as? Int) ?? 0
-            let baseIndent = CGFloat(max(0, listDepth)) * 24
-            style.firstLineHeadIndent = baseIndent
-            style.headIndent = baseIndent
-
-            // Align wrapped lines after the visible marker.
-            let markerLen = markerPrefixLength(in: paragraph)
-            if markerLen > 0 {
-                let markerAttr = paragraph.attributedSubstring(from: NSRange(location: 0, length: min(markerLen, paragraph.length)))
-                // Measure the attributed prefix using its actual fonts (checkbox glyph is larger).
-                let markerText = markerAttr.string
-                let markerFont = (markerAttr.attribute(.font, at: 0, effectiveRange: nil) as? NSFont) ?? NSFont.systemFont(ofSize: 16)
-                let cacheKey = markerText + "\0" + markerFont.fontName + "\0" + String(Double(markerFont.pointSize))
-                let markerWidth: CGFloat
-                if let cached = cachedMarkerWidth(for: cacheKey) {
-                    markerWidth = cached
-                } else {
-                    let rect = markerAttr.boundingRect(
-                        with: NSSize(width: 1000, height: 1000),
-                        options: [.usesFontLeading, .usesLineFragmentOrigin]
-                    )
-                    markerWidth = ceil(rect.width)
-                    setCachedMarkerWidth(markerWidth, for: cacheKey)
-                }
-                style.headIndent = baseIndent + max(24, markerWidth + 8)
+            let markerAdvance = (paragraph.attribute(.kernMarkerAdvance, at: 0, effectiveRange: nil) as? NSNumber).map {
+                CGFloat(truncating: $0)
             }
-
-            paragraph.addAttribute(.paragraphStyle, value: style, range: full)
+            paragraph.addAttribute(
+                .paragraphStyle,
+                value: listParagraphStyle(listDepth: listDepth, markerAdvance: markerAdvance),
+                range: full
+            )
         }
     }
 
@@ -3675,12 +4137,26 @@ enum NativeMarkdownCodec {
 
     // MARK: - Inline parsing / rendering
 
+    private enum InlineLinkValue: Equatable, Hashable {
+        case url(URL)
+        case raw(String)
+
+        var attributeValue: Any {
+            switch self {
+            case .url(let url):
+                return url
+            case .raw(let string):
+                return string
+            }
+        }
+    }
+
     private struct InlineStyle: Equatable, Hashable {
         var strong: Bool = false
         var emphasis: Bool = false
         var strike: Bool = false
         var code: Bool = false
-        var link: URL? = nil
+        var link: InlineLinkValue? = nil
         var linkDestination: String? = nil
         var autolink: Bool = false
         var linkTitle: String? = nil
@@ -3691,9 +4167,52 @@ enum NativeMarkdownCodec {
     private struct InlineParseCacheKey: Hashable {
         let text: String
         let style: InlineStyle
+        let fontName: String
+        let pointSize: CGFloat
+        let themeSignature: String
+        let baseURLSignature: String
+        let referenceDefinitionsSignature: Int
+        let remoteImageLoadingEnabled: Bool
     }
 
-    private static let inlineSyntaxCharacterSet = CharacterSet(charactersIn: "\\!<[$`*_~")
+    private struct CodeBlockAttributedCacheKey: Hashable {
+        let code: String
+        let infoString: String
+        let language: String
+        let fontName: String
+        let pointSize: CGFloat
+        let syntaxHighlightingEnabled: Bool
+        let themeSignature: String
+    }
+
+    private struct TableAttributedCacheKey: Hashable {
+        let rows: [[String]]
+        let alignments: [TableColumnAlignment]
+        let fontName: String
+        let pointSize: CGFloat
+        let terminateLastParagraph: Bool
+        let themeSignature: String
+        let baseURLSignature: String
+        let referenceDefinitionsSignature: Int
+        let remoteImageLoadingEnabled: Bool
+    }
+
+    private struct ParagraphContinuationBoundaryCacheKey: Hashable {
+        let lineIndex: Int
+        let quoteDepth: Int
+    }
+
+    private static func containsInlineSyntax(in text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 33, 36, 42, 60, 91, 92, 95, 96, 126: // ! $ * < [ \ _ ` ~
+                return true
+            default:
+                continue
+            }
+        }
+        return false
+    }
 
     private static func cachedSyntaxHighlightingRegex(
         cacheKey: String,
@@ -3723,6 +4242,160 @@ enum NativeMarkdownCodec {
 
     private static func setCachedMarkerWidth(_ width: CGFloat, for cacheKey: String) {
         withCacheLock { markerWidthCache[cacheKey] = width }
+    }
+
+    private static func cachedListParagraphStyle(for cacheKey: ListParagraphStyleCacheKey) -> NSParagraphStyle? {
+        withCacheLock { listParagraphStyleCache[cacheKey] }
+    }
+
+    private static func setCachedListParagraphStyle(_ style: NSParagraphStyle, for cacheKey: ListParagraphStyleCacheKey) {
+        withCacheLock { listParagraphStyleCache[cacheKey] = style }
+    }
+
+    private static func cachedHeadingParagraphStyle(for cacheKey: HeadingParagraphStyleCacheKey) -> NSParagraphStyle? {
+        withCacheLock { headingParagraphStyleCache[cacheKey] }
+    }
+
+    private static func setCachedHeadingParagraphStyle(_ style: NSParagraphStyle, for cacheKey: HeadingParagraphStyleCacheKey) {
+        withCacheLock { headingParagraphStyleCache[cacheKey] = style }
+    }
+
+    private static func cachedListMarkerPrefix(for cacheKey: ListMarkerPrefixCacheKey) -> ListMarkerPrefixTemplate? {
+        withCacheLock { listMarkerPrefixCache[cacheKey] }
+    }
+
+    private static func setCachedListMarkerPrefix(_ template: ListMarkerPrefixTemplate, for cacheKey: ListMarkerPrefixCacheKey) {
+        withCacheLock { listMarkerPrefixCache[cacheKey] = template }
+    }
+
+    private static func listMarkerPrefixTemplate(
+        kind: ListMarkerPrefixKind,
+        baseFont: NSFont
+    ) -> ListMarkerPrefixTemplate {
+        let cacheKey = ListMarkerPrefixCacheKey(
+            kind: kind,
+            fontName: baseFont.fontName,
+            pointSizeTimes100: Int((baseFont.pointSize * 100).rounded()),
+            themeSignature: NativeEditorAppearance.appearanceCacheSignature()
+        )
+        if let cached = cachedListMarkerPrefix(for: cacheKey) {
+            return cached
+        }
+
+        let para = NSMutableAttributedString()
+        let markerAttrs = baseAttributes(baseFont: baseFont).merging(
+            [.kernMarker: true],
+            uniquingKeysWith: { $1 }
+        )
+
+        switch kind {
+        case .bullet:
+            para.append(NSAttributedString(string: "• ", attributes: markerAttrs))
+
+        case let .taskStandalone(checked):
+            let checkboxFont = CheckboxStyle.preferredFont(pointSize: baseFont.pointSize + 4)
+            let checkboxChar = checked ? "\u{2611}" : "\u{2610}"
+            var checkboxAttrs = markerAttrs
+            checkboxAttrs[.font] = checkboxFont
+            checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
+            checkboxAttrs[.kernCheckbox] = true
+            checkboxAttrs[.kernCheckboxChecked] = checked
+            para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
+            para.append(NSAttributedString(string: " ", attributes: markerAttrs))
+
+        case let .taskBulleted(checked):
+            para.append(NSAttributedString(string: "• ", attributes: markerAttrs))
+            let checkboxFont = CheckboxStyle.preferredFont(pointSize: baseFont.pointSize + 4)
+            let checkboxChar = checked ? "\u{2611}" : "\u{2610}"
+            var checkboxAttrs = markerAttrs
+            checkboxAttrs[.font] = checkboxFont
+            checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
+            checkboxAttrs[.kernCheckbox] = true
+            checkboxAttrs[.kernCheckboxChecked] = checked
+            para.append(NSAttributedString(string: checkboxChar, attributes: checkboxAttrs))
+            para.append(NSAttributedString(string: " ", attributes: markerAttrs))
+
+        case let .ordered(marker, depth):
+            var orderedMarkerAttrs = markerAttrs
+            orderedMarkerAttrs[.font] = orderedMarkerFont(baseFont: baseFont, depth: depth)
+            para.append(NSAttributedString(string: marker, attributes: orderedMarkerAttrs))
+        }
+
+        let template = ListMarkerPrefixTemplate(
+            attributed: para.copy() as! NSAttributedString,
+            markerLength: para.length,
+            markerAdvance: measuredMarkerAdvance(in: para, markerLength: para.length)
+        )
+        setCachedListMarkerPrefix(template, for: cacheKey)
+        return template
+    }
+
+    private static func measuredMarkerAdvance(in paragraph: NSAttributedString, markerLength: Int) -> CGFloat {
+        let clampedLength = min(markerLength, paragraph.length)
+        guard clampedLength > 0 else { return 0 }
+        let markerAttr = paragraph.attributedSubstring(from: NSRange(location: 0, length: clampedLength))
+        let markerText = markerAttr.string
+        let markerFont = (markerAttr.attribute(.font, at: 0, effectiveRange: nil) as? NSFont) ?? NSFont.systemFont(ofSize: 16)
+        let cacheKey = markerText + "\0" + markerFont.fontName + "\0" + String(Double(markerFont.pointSize))
+        if let cached = cachedMarkerWidth(for: cacheKey) {
+            return cached
+        }
+
+        let rect = markerAttr.boundingRect(
+            with: NSSize(width: 1000, height: 1000),
+            options: [.usesFontLeading, .usesLineFragmentOrigin]
+        )
+        let markerWidth = ceil(rect.width)
+        setCachedMarkerWidth(markerWidth, for: cacheKey)
+        return markerWidth
+    }
+
+    private static func attachMarkerAdvance(_ markerAdvance: CGFloat, to paragraph: NSMutableAttributedString) {
+        guard paragraph.length > 0, markerAdvance > 0 else { return }
+        paragraph.addAttribute(.kernMarkerAdvance, value: NSNumber(value: Double(markerAdvance)), range: NSRange(location: 0, length: 1))
+    }
+
+    private static func listParagraphStyle(listDepth: Int, markerAdvance: CGFloat?) -> NSParagraphStyle {
+        let resolvedMarkerAdvance = max(0, markerAdvance ?? 0)
+        let cacheKey = ListParagraphStyleCacheKey(
+            listDepth: max(0, listDepth),
+            markerAdvanceTimes100: Int((resolvedMarkerAdvance * 100).rounded())
+        )
+        if let cached = cachedListParagraphStyle(for: cacheKey) {
+            return cached
+        }
+
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = 5
+        style.paragraphSpacing = 5
+        style.lineHeightMultiple = 1.12
+
+        let baseIndent = CGFloat(max(0, listDepth)) * 24
+        style.firstLineHeadIndent = baseIndent
+        style.headIndent = baseIndent
+        if resolvedMarkerAdvance > 0 {
+            style.headIndent = baseIndent + max(24, resolvedMarkerAdvance + 8)
+        }
+
+        let frozen = style.copy() as! NSParagraphStyle
+        setCachedListParagraphStyle(frozen, for: cacheKey)
+        return frozen
+    }
+
+    private static func headingParagraphStyle(level: Int) -> NSParagraphStyle {
+        let cacheKey = HeadingParagraphStyleCacheKey(level: max(1, min(6, level)))
+        if let cached = cachedHeadingParagraphStyle(for: cacheKey) {
+            return cached
+        }
+
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = cacheKey.level == 1 ? 14 : 10
+        style.paragraphSpacing = 6
+        style.lineHeightMultiple = 1.12
+
+        let frozen = style.copy() as! NSParagraphStyle
+        setCachedHeadingParagraphStyle(frozen, for: cacheKey)
+        return frozen
     }
 
     private static func cachedInlineFont(baseFont: NSFont, style: InlineStyle) -> NSFont {
@@ -3809,11 +4482,15 @@ enum NativeMarkdownCodec {
     static func parseInline(_ text: String, baseFont: NSFont) -> NSAttributedString {
         let ctx = ImportContext(
             referenceDefinitions: [:],
+            referenceDefinitionsSignature: 0,
             baseURL: nil,
+            baseURLSignature: "",
             options: .fromUserDefaults(),
             strictConformanceRoundTripMode: false,
             syntaxHighlightingEnabled: true,
-            inlineParseCache: nil
+            inlineParseCache: nil,
+            themeSignature: NativeEditorAppearance.appearanceCacheSignature(),
+            profiler: nil
         )
         return parseInline(text, baseFont: baseFont, style: InlineStyle(), ctx: ctx)
     }
@@ -3822,17 +4499,26 @@ enum NativeMarkdownCodec {
         parseInline(text, baseFont: baseFont, style: InlineStyle(), ctx: ctx)
     }
 
-    private static func parseAutolinkURL(_ inner: String) -> URL? {
+    private static func makeInlineContent(_ text: String, baseFont: NSFont, containsInlineSyntax: Bool, ctx: ImportContext) -> NSAttributedString {
+        if !ctx.strictConformanceRoundTripMode, !containsInlineSyntax {
+            return makeInlineAttributed(text, baseFont: baseFont, style: InlineStyle())
+        }
+        return parseInline(text, baseFont: baseFont, ctx: ctx)
+    }
+
+    private static func parseAutolinkURL<S: StringProtocol>(_ inner: S) -> URL? {
         // CommonMark autolinks disallow whitespace.
         if inner.contains(where: { $0.isWhitespace }) { return nil }
 
-        if inner.hasPrefix("http://") || inner.hasPrefix("https://") {
-            return URL(string: inner)
+        let innerString = String(inner)
+
+        if innerString.hasPrefix("http://") || innerString.hasPrefix("https://") {
+            return URL(string: innerString)
         }
 
         // Email autolink: <me@example.com>
-        if inner.contains("@"), !inner.contains(":") {
-            return URL(string: "mailto:\(inner)")
+        if innerString.contains("@"), !innerString.contains(":") {
+            return URL(string: "mailto:\(innerString)")
         }
 
         return nil
@@ -3844,12 +4530,51 @@ enum NativeMarkdownCodec {
     }
 
     private struct BracketContent {
-        let text: String
+        let contentRange: Range<Int>
         let closeIndex: Int
         let nextIndex: Int
     }
 
+    private struct InlineLinkTarget {
+        let destinationRange: Range<Int>
+        let titleRange: Range<Int>?
+        let nextIndex: Int
+    }
+
     private static func parseInline(_ text: String, baseFont: NSFont, style: InlineStyle, ctx: ImportContext) -> NSAttributedString {
+        if let profiler = ctx.profiler {
+            return profiler.measureInlineParse(utf16Count: text.utf16.count) {
+                parseInlineMeasured(text, baseFont: baseFont, style: style, ctx: ctx)
+            }
+        }
+        return parseInlineMeasured(text, baseFont: baseFont, style: style, ctx: ctx)
+    }
+
+    private static func inlineCacheBaseURLSignature(_ baseURL: URL?) -> String {
+        guard let baseURL else { return "" }
+        if baseURL.isFileURL {
+            return baseURL.standardizedFileURL.absoluteString
+        }
+        return baseURL.absoluteString
+    }
+
+    private static func inlineCacheReferenceDefinitionsSignature(
+        _ referenceDefinitions: [String: ReferenceDefinition]
+    ) -> Int {
+        guard !referenceDefinitions.isEmpty else { return 0 }
+        var hasher = Hasher()
+        for key in referenceDefinitions.keys.sorted() {
+            hasher.combine(key)
+            if let definition = referenceDefinitions[key] {
+                hasher.combine(definition.id)
+                hasher.combine(definition.destination)
+                hasher.combine(definition.title)
+            }
+        }
+        return hasher.finalize()
+    }
+
+    private static func parseInlineMeasured(_ text: String, baseFont: NSFont, style: InlineStyle, ctx: ImportContext) -> NSAttributedString {
         if ctx.strictConformanceRoundTripMode {
             let attr = NSMutableAttributedString(attributedString: makeInlineAttributed(text, baseFont: baseFont, style: style))
             if attr.length > 0 {
@@ -3860,41 +4585,642 @@ enum NativeMarkdownCodec {
 
         // Fast path for lines with no inline syntax delimiters.
         // This avoids materializing `[Character]` for the common plain-text case.
-        if text.rangeOfCharacter(from: inlineSyntaxCharacterSet) == nil {
+        if !containsInlineSyntax(in: text) {
             return makeInlineAttributed(text, baseFont: baseFont, style: style)
         }
 
-        let cacheEligible = text.utf16.count <= 384
+        let cacheEligible = text.utf16.count <= inlineParseCacheMaxUTF16(for: style)
         let inlineCache = cacheEligible ? ctx.inlineParseCache : nil
         var cacheKey: InlineParseCacheKey?
         if let inlineCache {
-            let key = InlineParseCacheKey(text: text, style: style)
+            let key = InlineParseCacheKey(
+                text: text,
+                style: style,
+                fontName: baseFont.fontName,
+                pointSize: baseFont.pointSize,
+                themeSignature: ctx.themeSignature,
+                baseURLSignature: ctx.baseURLSignature,
+                referenceDefinitionsSignature: ctx.referenceDefinitionsSignature,
+                remoteImageLoadingEnabled: ctx.options.remoteImageLoadingEnabled
+            )
             if let cached = inlineCache.value(for: key) {
                 return cached
             }
             cacheKey = key
         }
 
-        // Lightweight inline parser for the native editor subset:
-        // - code spans (variable backtick fence length)
-        // - emphasis/strong/strikethrough with `*` and `_`
-        // - links (inline + reference + title)
-        // - images (inline + reference) as attachments
-        // - inline math (`$...$`) rendered without delimiters
-        // - autolinks
-        let out = NSMutableAttributedString()
-        let chars = Array(text)
-        var i = 0
-        var literalBuffer = ""
-
-        func flushLiterals() {
-            guard !literalBuffer.isEmpty else { return }
-            out.append(makeInlineAttributed(literalBuffer, baseFont: baseFont, style: style))
-            literalBuffer = ""
+        if let rangeFirst = parseInlineRangeFirstPhase1(text, baseFont: baseFont, style: style, ctx: ctx) {
+            if let inlineCache, let cacheKey {
+                inlineCache.insert(rangeFirst, for: cacheKey)
+                return rangeFirst
+            }
+            return rangeFirst
         }
 
-        func appendLiteral(_ s: String, style: InlineStyle) {
-            out.append(makeInlineAttributed(s, baseFont: baseFont, style: style))
+        let chars = Array(text)
+        let out = parseInlineCharacters(chars, range: 0..<chars.count, baseFont: baseFont, style: style, ctx: ctx)
+        if let inlineCache, let cacheKey {
+            // The parser never mutates returned attributed strings after construction.
+            // Reusing the same instance avoids an extra defensive copy on hot paths.
+            inlineCache.insert(out, for: cacheKey)
+            return out
+        }
+        return out
+    }
+
+    private struct RangeCodeSpanMatch {
+        let innerRange: Range<String.Index>
+        let sourceRange: Range<String.Index>
+        let fenceLength: Int
+        let nextIndex: String.Index
+    }
+
+    private struct RangeBracketContent {
+        let contentRange: Range<String.Index>
+        let closeIndex: String.Index
+        let nextIndex: String.Index
+    }
+
+    private struct RangeInlineLinkTarget {
+        let destinationRange: Range<String.Index>
+        let titleRange: Range<String.Index>?
+        let nextIndex: String.Index
+    }
+
+    private struct RangeInlineParseResult {
+        let attributed: NSAttributedString
+        let nextIndex: String.Index
+    }
+
+    private static func parseInlineRangeFirstPhase1(
+        _ text: String,
+        baseFont: NSFont,
+        style: InlineStyle,
+        ctx: ImportContext
+    ) -> NSAttributedString? {
+        var index = text.startIndex
+        var literalStart = index
+        let out = NSMutableAttributedString()
+        out.beginEditing()
+        defer { out.endEditing() }
+
+        func flushLiteral(upTo end: String.Index) {
+            guard literalStart < end else {
+                literalStart = end
+                return
+            }
+            out.append(
+                makeInlineAttributed(
+                    String(text[literalStart..<end]),
+                    baseFont: baseFont,
+                    style: style
+                )
+            )
+            literalStart = end
+        }
+
+        func appendEscapedLiteral(_ character: Character) {
+            let attr = NSMutableAttributedString(
+                attributedString: makeInlineAttributed(
+                    String(character),
+                    baseFont: baseFont,
+                    style: style
+                )
+            )
+            if attr.length > 0 {
+                attr.addAttribute(.kernEscapedLiteral, value: true, range: NSRange(location: 0, length: attr.length))
+            }
+            out.append(attr)
+        }
+
+        while index < text.endIndex {
+            let ch = text[index]
+
+            if ch != "\\" && ch != "<" && ch != "`" && ch != "[" {
+                if ch == "!" || ch == "$" || ch == "*" || ch == "_" || ch == "~" {
+                    return nil
+                }
+                index = text.index(after: index)
+                continue
+            }
+
+            flushLiteral(upTo: index)
+
+            if ch == "[" {
+                guard let parsed = parseLinkRangeFirst(
+                    text,
+                    startIndex: index,
+                    parentStyle: style,
+                    baseFont: baseFont,
+                    ctx: ctx
+                ) else {
+                    return nil
+                }
+                out.append(parsed.attributed)
+                index = parsed.nextIndex
+                literalStart = index
+                continue
+            }
+
+            if ch == "\\" {
+                let next = text.index(after: index)
+                if next < text.endIndex, isMarkdownEscapable(text[next]) {
+                    appendEscapedLiteral(text[next])
+                    index = text.index(after: next)
+                    literalStart = index
+                    continue
+                }
+                index = next
+                continue
+            }
+
+            if ch == "<" {
+                if let parsed = parseAutolinkRangeFirst(text, startIndex: index) {
+                    var nextStyle = style
+                    nextStyle.link = .url(parsed.url)
+                    nextStyle.autolink = true
+                    out.append(
+                        makeInlineAttributed(
+                            String(text[parsed.innerRange]),
+                            baseFont: baseFont,
+                            style: nextStyle
+                        )
+                    )
+                    index = parsed.nextIndex
+                    literalStart = index
+                    continue
+                }
+                index = text.index(after: index)
+                continue
+            }
+
+            if ch == "`" {
+                if let parsed = parseCodeSpanRangeFirst(text, startIndex: index) {
+                    let normalizedText = normalizeCodeSpanText(text, range: parsed.innerRange)
+                    var nextStyle = style
+                    nextStyle.code = true
+                    nextStyle.strong = false
+                    nextStyle.emphasis = false
+                    nextStyle.strike = false
+                    let attr = NSMutableAttributedString(
+                        attributedString: makeInlineAttributed(normalizedText, baseFont: baseFont, style: nextStyle)
+                    )
+                    if parsed.fenceLength > 1
+                        || normalizedText.contains("`")
+                        || normalizedText.hasPrefix(" ")
+                        || normalizedText.hasSuffix(" ")
+                    {
+                        attr.addAttribute(
+                            .kernSourceMarkdown,
+                            value: String(text[parsed.sourceRange]),
+                            range: NSRange(location: 0, length: attr.length)
+                        )
+                    }
+                    out.append(attr)
+                    index = parsed.nextIndex
+                    literalStart = index
+                    continue
+                }
+
+                var runEnd = index
+                while runEnd < text.endIndex, text[runEnd] == "`" {
+                    runEnd = text.index(after: runEnd)
+                }
+                index = runEnd
+                continue
+            }
+        }
+
+        flushLiteral(upTo: text.endIndex)
+        return out
+    }
+
+    private struct RangeAutolinkMatch {
+        let innerRange: Range<String.Index>
+        let url: URL
+        let nextIndex: String.Index
+    }
+
+    private static func parseAutolinkRangeFirst(
+        _ text: String,
+        startIndex: String.Index
+    ) -> RangeAutolinkMatch? {
+        guard startIndex < text.endIndex, text[startIndex] == "<" else { return nil }
+        var index = text.index(after: startIndex)
+        while index < text.endIndex {
+            if text[index] == ">" {
+                let innerRange = text.index(after: startIndex)..<index
+                guard let url = parseAutolinkURL(text[innerRange]) else { return nil }
+                return RangeAutolinkMatch(
+                    innerRange: innerRange,
+                    url: url,
+                    nextIndex: text.index(after: index)
+                )
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func parseBracketContentRangeFirst(
+        _ text: String,
+        openIndex: String.Index,
+        limit: String.Index
+    ) -> RangeBracketContent? {
+        guard openIndex < limit, text[openIndex] == "[" else { return nil }
+        var index = text.index(after: openIndex)
+        var depth = 1
+        var escaped = false
+        while index < limit {
+            let ch = text[index]
+            if escaped {
+                escaped = false
+                index = text.index(after: index)
+                continue
+            }
+            if ch == "\\" {
+                escaped = true
+                index = text.index(after: index)
+                continue
+            }
+            if ch == "[" {
+                depth += 1
+                index = text.index(after: index)
+                continue
+            }
+            if ch == "]" {
+                depth -= 1
+                if depth > 0 {
+                    index = text.index(after: index)
+                    continue
+                }
+                return RangeBracketContent(
+                    contentRange: text.index(after: openIndex)..<index,
+                    closeIndex: index,
+                    nextIndex: text.index(after: index)
+                )
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func parseInlineLinkDestinationRangeFirst(
+        _ text: String,
+        openParenIndex: String.Index,
+        limit: String.Index
+    ) -> RangeInlineLinkTarget? {
+        guard openParenIndex < limit, text[openParenIndex] == "(" else { return nil }
+
+        var index = text.index(after: openParenIndex)
+        while index < limit, isASCIISpace(text[index]) {
+            index = text.index(after: index)
+        }
+        guard index < limit else { return nil }
+
+        let destinationRange: Range<String.Index>
+
+        if text[index] == "<" {
+            let destinationStart = text.index(after: index)
+            index = destinationStart
+            var escaped = false
+            var sawClosingAngle = false
+            while index < limit {
+                let ch = text[index]
+                if escaped {
+                    escaped = false
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "\\" {
+                    escaped = true
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == ">" {
+                    sawClosingAngle = true
+                    index = text.index(after: index)
+                    break
+                }
+                if ch == "<" || ch == "\n" || ch == "\r" {
+                    return nil
+                }
+                index = text.index(after: index)
+            }
+            guard sawClosingAngle, destinationStart < text.index(before: index) else { return nil }
+            destinationRange = destinationStart..<text.index(before: index)
+        } else {
+            let destinationStart = index
+            var escaped = false
+            var parenDepth = 0
+            while index < limit {
+                let ch = text[index]
+                if escaped {
+                    escaped = false
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "\\" {
+                    escaped = true
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "(" {
+                    parenDepth += 1
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == ")" {
+                    if parenDepth == 0 {
+                        break
+                    }
+                    parenDepth -= 1
+                    index = text.index(after: index)
+                    continue
+                }
+                if isASCIISpace(ch) {
+                    break
+                }
+                if ch == "<" || ch == ">" {
+                    return nil
+                }
+                index = text.index(after: index)
+            }
+            guard destinationStart < index else { return nil }
+            destinationRange = destinationStart..<index
+        }
+
+        while index < limit, isASCIISpace(text[index]) {
+            index = text.index(after: index)
+        }
+
+        var titleRange: Range<String.Index>?
+        if index < limit, text[index] != ")" {
+            guard let parsedTitle = parseInlineLinkTitleRangeFirst(text, startIndex: index, limit: limit) else { return nil }
+            titleRange = parsedTitle.titleRange
+            index = parsedTitle.nextIndex
+            while index < limit, isASCIISpace(text[index]) {
+                index = text.index(after: index)
+            }
+        }
+
+        guard index < limit, text[index] == ")" else { return nil }
+        return RangeInlineLinkTarget(
+            destinationRange: destinationRange,
+            titleRange: titleRange,
+            nextIndex: text.index(after: index)
+        )
+    }
+
+    private static func parseInlineLinkTitleRangeFirst(
+        _ text: String,
+        startIndex: String.Index,
+        limit: String.Index
+    ) -> (titleRange: Range<String.Index>, nextIndex: String.Index)? {
+        guard startIndex < limit else { return nil }
+        let opener = text[startIndex]
+
+        if opener == "\"" || opener == "'" {
+            let titleStart = text.index(after: startIndex)
+            var index = titleStart
+            var escaped = false
+            while index < limit {
+                let ch = text[index]
+                if escaped {
+                    escaped = false
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "\\" {
+                    escaped = true
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == opener {
+                    return (titleStart..<index, text.index(after: index))
+                }
+                index = text.index(after: index)
+            }
+            return nil
+        }
+
+        if opener == "(" {
+            let titleStart = text.index(after: startIndex)
+            var index = titleStart
+            var escaped = false
+            var depth = 1
+            while index < limit {
+                let ch = text[index]
+                if escaped {
+                    escaped = false
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "\\" {
+                    escaped = true
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == "(" {
+                    depth += 1
+                    index = text.index(after: index)
+                    continue
+                }
+                if ch == ")" {
+                    depth -= 1
+                    if depth == 0 {
+                        return (titleStart..<index, text.index(after: index))
+                    }
+                    index = text.index(after: index)
+                    continue
+                }
+                index = text.index(after: index)
+            }
+        }
+
+        return nil
+    }
+
+    private static func parseLinkRangeFirst(
+        _ text: String,
+        startIndex: String.Index,
+        parentStyle: InlineStyle,
+        baseFont: NSFont,
+        ctx: ImportContext
+    ) -> RangeInlineParseResult? {
+        guard let linkText = parseBracketContentRangeFirst(text, openIndex: startIndex, limit: text.endIndex) else { return nil }
+        guard !linkText.contentRange.isEmpty else { return nil }
+
+        let linkLabel = String(text[linkText.contentRange])
+        let allowRichLabelParsing = shouldParseSimpleLinkLabel(linkLabel)
+
+        if linkText.nextIndex < text.endIndex, text[linkText.nextIndex] == "(",
+           let target = parseInlineLinkDestinationRangeFirst(text, openParenIndex: linkText.nextIndex, limit: text.endIndex)
+        {
+            if !allowRichLabelParsing {
+                let literalEnd = extendedLiteralLinkEndIndexRangeFirst(
+                    text: text,
+                    initialEnd: target.nextIndex,
+                    linkLabelRange: linkText.contentRange
+                )
+                return makeSourceLiteralResultRangeFirst(
+                    text: text,
+                    startIndex: startIndex,
+                    nextIndex: literalEnd,
+                    baseFont: baseFont,
+                    style: parentStyle
+                )
+            }
+
+            let rawDestination = String(text[target.destinationRange])
+            let resolvedDestination = unescapeMarkdownBackslashes(rawDestination)
+            guard let linkValue = inlineLinkValue(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
+
+            var linkStyle = parentStyle
+            linkStyle.link = linkValue
+            linkStyle.linkDestination = rawDestination
+            linkStyle.autolink = false
+            let rawTitle = target.titleRange.map { String(text[$0]) }
+            linkStyle.linkTitle = rawTitle
+            linkStyle.linkReferenceID = nil
+            linkStyle.linkReferenceURL = nil
+
+            let inner = NSMutableAttributedString(
+                attributedString: parseInline(linkLabel, baseFont: baseFont, style: linkStyle, ctx: ctx)
+            )
+            if inner.length > 0 {
+                inner.addAttribute(.kernLinkDestination, value: rawDestination, range: NSRange(location: 0, length: inner.length))
+                if let title = rawTitle {
+                    inner.addAttribute(.kernLinkTitle, value: title, range: NSRange(location: 0, length: inner.length))
+                }
+            }
+            return RangeInlineParseResult(attributed: inner, nextIndex: target.nextIndex)
+        }
+
+        if linkText.nextIndex < text.endIndex, text[linkText.nextIndex] == "[",
+           let ref = parseBracketContentRangeFirst(text, openIndex: linkText.nextIndex, limit: text.endIndex)
+        {
+            if !allowRichLabelParsing {
+                let literalEnd = extendedLiteralLinkEndIndexRangeFirst(
+                    text: text,
+                    initialEnd: ref.nextIndex,
+                    linkLabelRange: linkText.contentRange
+                )
+                return makeSourceLiteralResultRangeFirst(
+                    text: text,
+                    startIndex: startIndex,
+                    nextIndex: literalEnd,
+                    baseFont: baseFont,
+                    style: parentStyle
+                )
+            }
+
+            let refID = ref.contentRange.isEmpty ? linkLabel : String(text[ref.contentRange])
+            if let definition = ctx.referenceDefinitions[refID.lowercased()] {
+                let resolvedDestination = unescapeMarkdownBackslashes(definition.destination)
+                guard let linkValue = inlineLinkValue(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
+
+                var linkStyle = parentStyle
+                linkStyle.link = linkValue
+                linkStyle.linkDestination = nil
+                linkStyle.autolink = false
+                linkStyle.linkTitle = definition.title
+                linkStyle.linkReferenceID = definition.id
+                linkStyle.linkReferenceURL = definition.destination
+
+                let inner = NSMutableAttributedString(
+                    attributedString: parseInline(linkLabel, baseFont: baseFont, style: linkStyle, ctx: ctx)
+                )
+                if inner.length > 0 {
+                    inner.addAttribute(.kernLinkReferenceID, value: definition.id, range: NSRange(location: 0, length: inner.length))
+                    inner.addAttribute(.kernLinkReferenceURL, value: definition.destination, range: NSRange(location: 0, length: inner.length))
+                    if let title = definition.title {
+                        inner.addAttribute(.kernLinkTitle, value: title, range: NSRange(location: 0, length: inner.length))
+                    }
+                }
+                return RangeInlineParseResult(attributed: inner, nextIndex: ref.nextIndex)
+            }
+        }
+
+        return nil
+    }
+
+    private static func makeSourceLiteralResultRangeFirst(
+        text: String,
+        startIndex: String.Index,
+        nextIndex: String.Index,
+        baseFont: NSFont,
+        style: InlineStyle
+    ) -> RangeInlineParseResult? {
+        guard startIndex < nextIndex else { return nil }
+        let sourceMarkdown = String(text[startIndex..<nextIndex])
+        let attr = NSMutableAttributedString(attributedString: makeInlineAttributed(sourceMarkdown, baseFont: baseFont, style: style))
+        if attr.length > 0 {
+            attr.addAttribute(.kernSourceMarkdown, value: sourceMarkdown, range: NSRange(location: 0, length: attr.length))
+        }
+        return RangeInlineParseResult(attributed: attr, nextIndex: nextIndex)
+    }
+
+    private static func extendedLiteralLinkEndIndexRangeFirst(
+        text: String,
+        initialEnd: String.Index,
+        linkLabelRange: Range<String.Index>
+    ) -> String.Index {
+        let backtickCount = text[linkLabelRange].reduce(into: 0) { partialResult, ch in
+            if ch == "`" {
+                partialResult += 1
+            }
+        }
+        if backtickCount % 2 != 0,
+           initialEnd < text.endIndex,
+           text[initialEnd] == "`" {
+            return text.index(after: initialEnd)
+        }
+        return initialEnd
+    }
+
+    private static func parseInlineCharacters(
+        _ chars: [Character],
+        range: Range<Int>,
+        baseFont: NSFont,
+        style: InlineStyle,
+        ctx: ImportContext
+    ) -> NSMutableAttributedString {
+        let out = NSMutableAttributedString()
+        out.beginEditing()
+        defer { out.endEditing() }
+        appendInlineCharacters(chars, range: range, baseFont: baseFont, style: style, ctx: ctx, into: out)
+        return out
+    }
+
+    private static func appendInlineCharacters(
+        _ chars: [Character],
+        range: Range<Int>,
+        baseFont: NSFont,
+        style: InlineStyle,
+        ctx: ImportContext,
+        into out: NSMutableAttributedString
+    ) {
+        var i = range.lowerBound
+        var literalStart = range.lowerBound
+
+        func flushLiteral(upTo end: Int) {
+            guard literalStart < end else {
+                literalStart = end
+                return
+            }
+            out.append(
+                makeInlineAttributed(
+                    materializeCharacters(chars, range: literalStart..<end),
+                    baseFont: baseFont,
+                    style: style
+                )
+            )
+            literalStart = end
+        }
+
+        func appendLiteral(_ text: String, style: InlineStyle) {
+            out.append(makeInlineAttributed(text, baseFont: baseFont, style: style))
         }
 
         func appendEscapedLiteral(_ s: String, style: InlineStyle) {
@@ -3906,53 +5232,63 @@ enum NativeMarkdownCodec {
         }
 
         func appendImageAttachment(alt: String, destination: String, sourceMarkdown: String) {
-            out.append(makeImageAttachmentAttributed(alt: alt, destination: destination, sourceMarkdown: sourceMarkdown, baseFont: baseFont, ctx: ctx))
+            out.append(
+                measureImportPhase(.makeImageAttachmentAttributed, profiler: ctx.profiler) {
+                    makeImageAttachmentAttributed(
+                        alt: alt,
+                        destination: destination,
+                        sourceMarkdown: sourceMarkdown,
+                        baseFont: baseFont,
+                        ctx: ctx
+                    )
+                }
+            )
         }
 
-        while i < chars.count {
+        while i < range.upperBound {
             let ch = chars[i]
 
-            // Fast path: accumulate plain characters that can't start any inline syntax.
+            // Fast path: advance over plain characters and flush them as one contiguous span.
             if ch != "\\" && ch != "!" && ch != "<" && ch != "[" && ch != "$" && ch != "`" && ch != "*" && ch != "_" && ch != "~" {
-                literalBuffer.append(ch)
                 i += 1
                 continue
             }
 
-            // Flush accumulated plain text before handling any delimiter.
-            flushLiterals()
+            flushLiteral(upTo: i)
 
             // Escape: only strip the backslash for escapable punctuation.
             if ch == "\\" {
-                if i + 1 < chars.count, isMarkdownEscapable(chars[i + 1]) {
+                if i + 1 < range.upperBound, isMarkdownEscapable(chars[i + 1]) {
                     appendEscapedLiteral(String(chars[i + 1]), style: style)
                     i += 2
+                    literalStart = i
                     continue
                 }
-                appendLiteral("\\", style: style)
                 i += 1
                 continue
             }
 
             // Images: ![alt](url "title") / ![alt][id]
-            if ch == "!", i + 1 < chars.count, chars[i + 1] == "[" {
-                if let image = parseImage(chars, startIndex: i, ctx: ctx) {
+            if ch == "!", i + 1 < range.upperBound, chars[i + 1] == "[" {
+                if let image = parseImage(chars, startIndex: i, limit: range.upperBound, ctx: ctx) {
                     appendImageAttachment(alt: image.alt, destination: image.destination, sourceMarkdown: image.sourceMarkdown)
                     i = image.nextIndex
+                    literalStart = i
                     continue
                 }
             }
 
             // Autolink: <https://...> or <me@example.com>
             if ch == "<" {
-                if let end = indexOf(">", in: chars, start: i + 1) {
-                    let inner = String(chars[(i + 1)..<end])
+                if let end = indexOf(">", in: chars, start: i + 1, limit: range.upperBound) {
+                    let inner = materializeCharacters(chars, range: (i + 1)..<end)
                     if let url = parseAutolinkURL(inner) {
                         var nextStyle = style
-                        nextStyle.link = url
+                        nextStyle.link = .url(url)
                         nextStyle.autolink = true
                         appendLiteral(inner, style: nextStyle)
                         i = end + 1
+                        literalStart = i
                         continue
                     }
                 }
@@ -3960,150 +5296,153 @@ enum NativeMarkdownCodec {
 
             // Link: [text](url "title") / [text][id]
             if ch == "[" {
-                if let link = parseLink(chars, startIndex: i, parentStyle: style, baseFont: baseFont, ctx: ctx) {
+                if let link = parseLink(chars, startIndex: i, limit: range.upperBound, parentStyle: style, baseFont: baseFont, ctx: ctx) {
                     out.append(link.attributed)
                     i = link.nextIndex
+                    literalStart = i
                     continue
                 }
             }
 
             // Inline math: $...$ (avoid currency, keep escaped dollars as literal text).
             if ch == "$" {
-                if let parsed = parseInlineMath(chars, startIndex: i, baseFont: baseFont) {
+                if let parsed = parseInlineMath(chars, startIndex: i, limit: range.upperBound, baseFont: baseFont) {
                     out.append(parsed.attributed)
                     i = parsed.nextIndex
+                    literalStart = i
                     continue
                 }
             }
 
             // Code span
             if ch == "`" {
-                if let parsed = parseCodeSpan(chars, startIndex: i) {
+                if let parsed = parseCodeSpan(chars, startIndex: i, limit: range.upperBound) {
+                    let normalizedText = normalizeCodeSpanText(chars, range: parsed.innerRange)
                     var nextStyle = style
                     nextStyle.code = true
                     nextStyle.strong = false
                     nextStyle.emphasis = false
                     nextStyle.strike = false
                     let attr = NSMutableAttributedString(
-                        attributedString: makeInlineAttributed(parsed.text, baseFont: baseFont, style: nextStyle)
+                        attributedString: makeInlineAttributed(normalizedText, baseFont: baseFont, style: nextStyle)
                     )
                     if parsed.fenceLength > 1
-                        || parsed.text.contains("`")
-                        || parsed.text.hasPrefix(" ")
-                        || parsed.text.hasSuffix(" ")
+                        || normalizedText.contains("`")
+                        || normalizedText.hasPrefix(" ")
+                        || normalizedText.hasSuffix(" ")
                     {
-                        attr.addAttribute(.kernSourceMarkdown, value: parsed.sourceMarkdown, range: NSRange(location: 0, length: attr.length))
+                        attr.addAttribute(
+                            .kernSourceMarkdown,
+                            value: materializeCharacters(chars, range: parsed.sourceRange),
+                            range: NSRange(location: 0, length: attr.length)
+                        )
                     }
                     out.append(attr)
                     i = parsed.nextIndex
+                    literalStart = i
                     continue
                 }
                 // No valid closing fence for this backtick run; emit the whole run literally
                 // so we don't re-enter on the same run and produce incorrect nested parses.
                 var runEnd = i
-                while runEnd < chars.count, chars[runEnd] == "`" {
+                while runEnd < range.upperBound, chars[runEnd] == "`" {
                     runEnd += 1
                 }
-                appendLiteral(String(chars[i..<runEnd]), style: style)
                 i = runEnd
                 continue
             }
 
             // Strong + emphasis (***text*** / ___text___)
-            if (ch == "*" || ch == "_"), i + 2 < chars.count, chars[i + 1] == ch, chars[i + 2] == ch {
-                if canOpenDelimiter(ch, count: 3, in: chars, at: i),
-                   let end = findClosingDelimiter(ch, count: 3, in: chars, start: i + 3)
+            if (ch == "*" || ch == "_"), i + 2 < range.upperBound, chars[i + 1] == ch, chars[i + 2] == ch {
+                if canOpenDelimiter(ch, count: 3, in: chars, at: i, lowerBound: range.lowerBound, upperBound: range.upperBound),
+                   let end = findClosingDelimiter(ch, count: 3, in: chars, start: i + 3, lowerBound: range.lowerBound, limit: range.upperBound)
                 {
-                    let inner = String(chars[(i + 3)..<end])
-                    if !isValidInlineDelimitedContent(inner) {
-                        appendLiteral(String(ch), style: style)
+                    let innerRange = (i + 3)..<end
+                    if !isValidInlineDelimitedContent(chars, range: innerRange) {
                         i += 1
                         continue
                     }
                     var nextStyle = style
                     nextStyle.strong.toggle()
                     nextStyle.emphasis.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    appendInlineCharacters(chars, range: innerRange, baseFont: baseFont, style: nextStyle, ctx: ctx, into: out)
                     i = end + 3
+                    literalStart = i
                     continue
                 }
             }
 
             // Strikethrough
-            if ch == "~", i + 1 < chars.count, chars[i + 1] == "~" {
-                if let end = indexOf("~~", in: chars, start: i + 2) {
-                    let inner = String(chars[(i + 2)..<end])
-                    if inner.isEmpty {
-                        appendLiteral("~", style: style)
+            if ch == "~", i + 1 < range.upperBound, chars[i + 1] == "~" {
+                if let end = findClosingDelimiter("~", count: 2, in: chars, start: i + 2, lowerBound: range.lowerBound, limit: range.upperBound) {
+                    let innerRange = (i + 2)..<end
+                    if innerRange.isEmpty {
                         i += 1
                         continue
                     }
                     var nextStyle = style
                     nextStyle.strike.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    appendInlineCharacters(chars, range: innerRange, baseFont: baseFont, style: nextStyle, ctx: ctx, into: out)
                     i = end + 2
+                    literalStart = i
                     continue
                 }
             }
 
             // Strong (**text** / __text__)
-            if (ch == "*" || ch == "_"), i + 1 < chars.count, chars[i + 1] == ch {
-                if canOpenDelimiter(ch, count: 2, in: chars, at: i),
-                   let end = findClosingDelimiter(ch, count: 2, in: chars, start: i + 2)
+            if (ch == "*" || ch == "_"), i + 1 < range.upperBound, chars[i + 1] == ch {
+                if canOpenDelimiter(ch, count: 2, in: chars, at: i, lowerBound: range.lowerBound, upperBound: range.upperBound),
+                   let end = findClosingDelimiter(ch, count: 2, in: chars, start: i + 2, lowerBound: range.lowerBound, limit: range.upperBound)
                 {
-                    let inner = String(chars[(i + 2)..<end])
-                    if !isValidInlineDelimitedContent(inner) {
-                        appendLiteral(String(ch), style: style)
+                    let innerRange = (i + 2)..<end
+                    if !isValidInlineDelimitedContent(chars, range: innerRange) {
                         i += 1
                         continue
                     }
                     var nextStyle = style
                     nextStyle.strong.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    appendInlineCharacters(chars, range: innerRange, baseFont: baseFont, style: nextStyle, ctx: ctx, into: out)
                     i = end + 2
+                    literalStart = i
                     continue
                 }
             }
 
             // Emphasis (*text* / _text_)
             if ch == "*" || ch == "_" {
-                if canOpenDelimiter(ch, count: 1, in: chars, at: i),
-                   let end = findClosingDelimiter(ch, count: 1, in: chars, start: i + 1)
+                if canOpenDelimiter(ch, count: 1, in: chars, at: i, lowerBound: range.lowerBound, upperBound: range.upperBound),
+                   let end = findClosingDelimiter(ch, count: 1, in: chars, start: i + 1, lowerBound: range.lowerBound, limit: range.upperBound)
                 {
-                    let inner = String(chars[(i + 1)..<end])
-                    if !isValidInlineDelimitedContent(inner) {
-                        appendLiteral(String(ch), style: style)
+                    let innerRange = (i + 1)..<end
+                    if !isValidInlineDelimitedContent(chars, range: innerRange) {
                         i += 1
                         continue
                     }
                     var nextStyle = style
                     nextStyle.emphasis.toggle()
-                    out.append(parseInline(inner, baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    appendInlineCharacters(chars, range: innerRange, baseFont: baseFont, style: nextStyle, ctx: ctx, into: out)
                     i = end + 1
+                    literalStart = i
                     continue
                 }
             }
 
-            appendLiteral(String(ch), style: style)
             i += 1
         }
 
-        flushLiterals()
-        if let inlineCache, let cacheKey {
-            // The parser never mutates returned attributed strings after construction.
-            // Reusing the same instance avoids an extra defensive copy on hot paths.
-            inlineCache.insert(out, for: cacheKey)
-            return out
-        }
-        return out
+        flushLiteral(upTo: range.upperBound)
     }
 
-    private static func parseBracketContent(_ chars: [Character], openIndex: Int) -> BracketContent? {
-        guard openIndex < chars.count, chars[openIndex] == "[" else { return nil }
+    private static func materializeCharacters(_ chars: [Character], range: Range<Int>) -> String {
+        String(chars[range])
+    }
+
+    private static func parseBracketContent(_ chars: [Character], openIndex: Int, limit: Int) -> BracketContent? {
+        guard openIndex < limit, chars[openIndex] == "[" else { return nil }
         var i = openIndex + 1
         var depth = 1
         var escaped = false
-        while i < chars.count {
+        while i < limit {
             let ch = chars[i]
             if escaped {
                 escaped = false
@@ -4126,43 +5465,44 @@ enum NativeMarkdownCodec {
                     i += 1
                     continue
                 }
-                let text = String(chars[(openIndex + 1)..<i])
-                return BracketContent(text: text, closeIndex: i, nextIndex: i + 1)
+                let contentRange = (openIndex + 1)..<i
+                return BracketContent(
+                    contentRange: contentRange,
+                    closeIndex: i,
+                    nextIndex: i + 1
+                )
             }
             i += 1
         }
         return nil
     }
 
-    private static func isValidInlineDelimitedContent(_ inner: String) -> Bool {
-        if inner.isEmpty { return false }
-        if inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
-        guard let first = inner.first, let last = inner.last else { return false }
+    private static func isValidInlineDelimitedContent(_ chars: [Character], range: Range<Int>) -> Bool {
+        guard !range.isEmpty else { return false }
+        let first = chars[range.lowerBound]
+        let last = chars[range.upperBound - 1]
         if first.isWhitespace || last.isWhitespace { return false }
         return true
     }
 
-    private static func parseInlineLinkDestination(_ chars: [Character], openParenIndex: Int) -> (destination: String, title: String?, nextIndex: Int)? {
-        guard openParenIndex < chars.count, chars[openParenIndex] == "(" else { return nil }
-
-        let destination: String
-        var title: String? = nil
+    private static func parseInlineLinkDestination(_ chars: [Character], openParenIndex: Int, limit: Int) -> InlineLinkTarget? {
+        guard openParenIndex < limit, chars[openParenIndex] == "(" else { return nil }
 
         var i = openParenIndex + 1
-        while i < chars.count, isASCIISpace(chars[i]) { i += 1 }
-        guard i < chars.count else { return nil }
+        while i < limit, isASCIISpace(chars[i]) { i += 1 }
+        guard i < limit else { return nil }
+
+        let destinationRange: Range<Int>
 
         if chars[i] == "<" {
             // Angle-bracket destination form: [label](<dest> "title")
-            i += 1
-            var parsed = ""
+            let destinationStart = i + 1
+            i = destinationStart
             var escaped = false
             var sawClosingAngle = false
-            while i < chars.count {
+            while i < limit {
                 let ch = chars[i]
                 if escaped {
-                    parsed.append("\\")
-                    parsed.append(ch)
                     escaped = false
                     i += 1
                     continue
@@ -4181,22 +5521,19 @@ enum NativeMarkdownCodec {
                 if ch == "<" || ch == "\n" || ch == "\r" {
                     return nil
                 }
-                parsed.append(ch)
                 i += 1
             }
-            guard sawClosingAngle, !parsed.isEmpty else { return nil }
-            destination = parsed
+            guard sawClosingAngle, destinationStart < (i - 1) else { return nil }
+            destinationRange = destinationStart..<(i - 1)
         } else {
             // Bare destination form: [label](dest "title")
             // Destination cannot contain ASCII whitespace. Balanced parentheses are allowed.
-            var parsed = ""
+            let destinationStart = i
             var escaped = false
             var parenDepth = 0
-            while i < chars.count {
+            while i < limit {
                 let ch = chars[i]
                 if escaped {
-                    parsed.append("\\")
-                    parsed.append(ch)
                     escaped = false
                     i += 1
                     continue
@@ -4208,7 +5545,6 @@ enum NativeMarkdownCodec {
                 }
                 if ch == "(" {
                     parenDepth += 1
-                    parsed.append(ch)
                     i += 1
                     continue
                 }
@@ -4217,7 +5553,6 @@ enum NativeMarkdownCodec {
                         break
                     }
                     parenDepth -= 1
-                    parsed.append(ch)
                     i += 1
                     continue
                 }
@@ -4227,39 +5562,38 @@ enum NativeMarkdownCodec {
                 if ch == "<" || ch == ">" {
                     return nil
                 }
-                parsed.append(ch)
                 i += 1
             }
-            guard !parsed.isEmpty else { return nil }
-            destination = parsed
+            guard destinationStart < i else { return nil }
+            destinationRange = destinationStart..<i
         }
 
-        while i < chars.count, isASCIISpace(chars[i]) { i += 1 }
+        while i < limit, isASCIISpace(chars[i]) { i += 1 }
 
-        if i < chars.count, chars[i] != ")" {
-            guard let parsedTitle = parseInlineLinkTitle(chars, startIndex: i) else { return nil }
-            title = parsedTitle.title
+        var titleRange: Range<Int>?
+        if i < limit, chars[i] != ")" {
+            guard let parsedTitle = parseInlineLinkTitle(chars, startIndex: i, limit: limit) else { return nil }
+            titleRange = parsedTitle.titleRange
             i = parsedTitle.nextIndex
-            while i < chars.count, isASCIISpace(chars[i]) { i += 1 }
+            while i < limit, isASCIISpace(chars[i]) { i += 1 }
         }
 
-        guard i < chars.count, chars[i] == ")" else { return nil }
-        return (destination, title, i + 1)
+        guard i < limit, chars[i] == ")" else { return nil }
+        return InlineLinkTarget(destinationRange: destinationRange, titleRange: titleRange, nextIndex: i + 1)
     }
 
-    private static func parseInlineLinkTitle(_ chars: [Character], startIndex: Int) -> (title: String, nextIndex: Int)? {
-        guard startIndex < chars.count else { return nil }
+
+    private static func parseInlineLinkTitle(_ chars: [Character], startIndex: Int, limit: Int) -> (titleRange: Range<Int>, nextIndex: Int)? {
+        guard startIndex < limit else { return nil }
         let opener = chars[startIndex]
 
         if opener == "\"" || opener == "'" {
-            var i = startIndex + 1
+            let titleStart = startIndex + 1
+            var i = titleStart
             var escaped = false
-            var value = ""
-            while i < chars.count {
+            while i < limit {
                 let ch = chars[i]
                 if escaped {
-                    value.append("\\")
-                    value.append(ch)
                     escaped = false
                     i += 1
                     continue
@@ -4270,24 +5604,21 @@ enum NativeMarkdownCodec {
                     continue
                 }
                 if ch == opener {
-                    return (value, i + 1)
+                    return (titleStart..<i, i + 1)
                 }
-                value.append(ch)
                 i += 1
             }
             return nil
         }
 
         if opener == "(" {
-            var i = startIndex + 1
+            let titleStart = startIndex + 1
+            var i = titleStart
             var escaped = false
             var depth = 1
-            var value = ""
-            while i < chars.count {
+            while i < limit {
                 let ch = chars[i]
                 if escaped {
-                    value.append("\\")
-                    value.append(ch)
                     escaped = false
                     i += 1
                     continue
@@ -4299,20 +5630,17 @@ enum NativeMarkdownCodec {
                 }
                 if ch == "(" {
                     depth += 1
-                    value.append(ch)
                     i += 1
                     continue
                 }
                 if ch == ")" {
                     depth -= 1
                     if depth == 0 {
-                        return (value, i + 1)
+                        return (titleStart..<i, i + 1)
                     }
-                    value.append(ch)
                     i += 1
                     continue
                 }
-                value.append(ch)
                 i += 1
             }
         }
@@ -4325,37 +5653,36 @@ enum NativeMarkdownCodec {
     }
 
     private struct CodeSpanMatch {
-        let text: String
-        let sourceMarkdown: String
+        let innerRange: Range<Int>
+        let sourceRange: Range<Int>
         let fenceLength: Int
         let nextIndex: Int
     }
 
-    private static func parseCodeSpan(_ chars: [Character], startIndex: Int) -> CodeSpanMatch? {
-        guard startIndex < chars.count, chars[startIndex] == "`" else { return nil }
+    private static func parseCodeSpan(_ chars: [Character], startIndex: Int, limit: Int) -> CodeSpanMatch? {
+        guard startIndex < limit, chars[startIndex] == "`" else { return nil }
 
         var fenceLen = 0
         var i = startIndex
-        while i < chars.count, chars[i] == "`" {
+        while i < limit, chars[i] == "`" {
             fenceLen += 1
             i += 1
         }
         guard fenceLen > 0 else { return nil }
 
         var scan = i
-        while scan < chars.count {
+        while scan < limit {
             if chars[scan] == "`" {
                 var run = 0
                 var j = scan
-                while j < chars.count, chars[j] == "`" {
+                while j < limit, chars[j] == "`" {
                     run += 1
                     j += 1
                 }
                 if run == fenceLen {
-                    let inner = String(chars[i..<scan])
                     return CodeSpanMatch(
-                        text: normalizeCodeSpanText(inner),
-                        sourceMarkdown: String(chars[startIndex..<j]),
+                        innerRange: i..<scan,
+                        sourceRange: startIndex..<j,
                         fenceLength: fenceLen,
                         nextIndex: j
                     )
@@ -4368,11 +5695,76 @@ enum NativeMarkdownCodec {
         return nil
     }
 
+    private static func parseCodeSpanRangeFirst(
+        _ text: String,
+        startIndex: String.Index
+    ) -> RangeCodeSpanMatch? {
+        guard startIndex < text.endIndex, text[startIndex] == "`" else { return nil }
+
+        var fenceLength = 0
+        var index = startIndex
+        while index < text.endIndex, text[index] == "`" {
+            fenceLength += 1
+            index = text.index(after: index)
+        }
+        guard fenceLength > 0 else { return nil }
+
+        let innerStart = index
+        var scan = innerStart
+        while scan < text.endIndex {
+            if text[scan] == "`" {
+                var runLength = 0
+                var runEnd = scan
+                while runEnd < text.endIndex, text[runEnd] == "`" {
+                    runLength += 1
+                    runEnd = text.index(after: runEnd)
+                }
+                if runLength == fenceLength {
+                    return RangeCodeSpanMatch(
+                        innerRange: innerStart..<scan,
+                        sourceRange: startIndex..<runEnd,
+                        fenceLength: fenceLength,
+                        nextIndex: runEnd
+                    )
+                }
+                scan = runEnd
+                continue
+            }
+            scan = text.index(after: scan)
+        }
+        return nil
+    }
+
     private static func normalizeCodeSpanText(_ inner: String) -> String {
-        var normalized = inner
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
+        guard inner.contains(where: { $0 == "\r" || $0 == "\n" }) else {
+            var normalized = inner
+            if normalized.hasPrefix(" "),
+               normalized.hasSuffix(" "),
+               normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                normalized.removeFirst()
+                normalized.removeLast()
+            }
+            return normalized
+        }
+
+        var normalized = String()
+        normalized.reserveCapacity(inner.utf16.count)
+        var index = inner.startIndex
+        while index < inner.endIndex {
+            let ch = inner[index]
+            if ch == "\r" {
+                let next = inner.index(after: index)
+                if next < inner.endIndex, inner[next] == "\n" {
+                    index = next
+                }
+                normalized.append(" ")
+            } else if ch == "\n" {
+                normalized.append(" ")
+            } else {
+                normalized.append(ch)
+            }
+            index = inner.index(after: index)
+        }
 
         if normalized.hasPrefix(" "),
            normalized.hasSuffix(" "),
@@ -4383,38 +5775,141 @@ enum NativeMarkdownCodec {
         return normalized
     }
 
-    private static func indexOfRepeated(_ ch: Character, count: Int, in chars: [Character], start: Int) -> Int? {
-        guard count > 0, start < chars.count else { return nil }
-        var i = start
-        while i <= chars.count - count {
-            var ok = true
-            for j in 0..<count where chars[i + j] != ch {
-                ok = false
+    private static func normalizeCodeSpanText(_ chars: [Character], range: Range<Int>) -> String {
+        guard !range.isEmpty else { return "" }
+
+        var containsLineBreak = false
+        for index in range {
+            let ch = chars[index]
+            if ch == "\r" || ch == "\n" {
+                containsLineBreak = true
                 break
             }
-            if ok { return i }
-            i += 1
         }
-        return nil
-    }
 
-    private static func findClosingDelimiter(_ ch: Character, count: Int, in chars: [Character], start: Int) -> Int? {
-        guard count > 0, start < chars.count else { return nil }
-        var cursor = start
-        while let candidate = indexOfRepeated(ch, count: count, in: chars, start: cursor) {
-            if canCloseDelimiter(ch, count: count, in: chars, at: candidate) {
-                return candidate
+        guard containsLineBreak else {
+            var normalized = materializeCharacters(chars, range: range)
+            if normalized.hasPrefix(" "),
+               normalized.hasSuffix(" "),
+               normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                normalized.removeFirst()
+                normalized.removeLast()
             }
-            cursor = candidate + 1
+            return normalized
+        }
+
+        var normalized = String()
+        normalized.reserveCapacity(range.count)
+        var index = range.lowerBound
+        while index < range.upperBound {
+            let ch = chars[index]
+            if ch == "\r" {
+                let next = index + 1
+                if next < range.upperBound, chars[next] == "\n" {
+                    index = next
+                }
+                normalized.append(" ")
+            } else if ch == "\n" {
+                normalized.append(" ")
+            } else {
+                normalized.append(ch)
+            }
+            index += 1
+        }
+
+        if normalized.hasPrefix(" "),
+           normalized.hasSuffix(" "),
+           normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            normalized.removeFirst()
+            normalized.removeLast()
+        }
+        return normalized
+    }
+
+    private static func normalizeCodeSpanText(_ text: String, range: Range<String.Index>) -> String {
+        guard !range.isEmpty else { return "" }
+
+        let inner = text[range]
+        guard inner.contains(where: { $0 == "\r" || $0 == "\n" }) else {
+            var normalized = String(inner)
+            if normalized.hasPrefix(" "),
+               normalized.hasSuffix(" "),
+               normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                normalized.removeFirst()
+                normalized.removeLast()
+            }
+            return normalized
+        }
+
+        var normalized = String()
+        normalized.reserveCapacity(inner.utf16.count)
+        var index = inner.startIndex
+        while index < inner.endIndex {
+            let ch = inner[index]
+            if ch == "\r" {
+                let next = inner.index(after: index)
+                if next < inner.endIndex, inner[next] == "\n" {
+                    index = next
+                }
+                normalized.append(" ")
+            } else if ch == "\n" {
+                normalized.append(" ")
+            } else {
+                normalized.append(ch)
+            }
+            index = inner.index(after: index)
+        }
+
+        if normalized.hasPrefix(" "),
+           normalized.hasSuffix(" "),
+           normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            normalized.removeFirst()
+            normalized.removeLast()
+        }
+        return normalized
+    }
+
+    private static func findClosingDelimiter(
+        _ ch: Character,
+        count: Int,
+        in chars: [Character],
+        start: Int,
+        lowerBound: Int,
+        limit: Int
+    ) -> Int? {
+        guard count > 0, start < limit else { return nil }
+        let lastCandidate = limit - count + 1
+        var index = start
+        while index < lastCandidate {
+            if chars[index] == ch {
+                var matchesRun = true
+                if count > 1 {
+                    for offset in 1..<count where chars[index + offset] != ch {
+                        matchesRun = false
+                        break
+                    }
+                }
+                if matchesRun,
+                   canCloseDelimiter(ch, count: count, in: chars, at: index, lowerBound: lowerBound, upperBound: limit) {
+                    return index
+                }
+            }
+            index += 1
         }
         return nil
     }
 
-    private static func canOpenDelimiter(_ marker: Character, count: Int, in chars: [Character], at index: Int) -> Bool {
+    private static func canOpenDelimiter(
+        _ marker: Character,
+        count: Int,
+        in chars: [Character],
+        at index: Int,
+        lowerBound: Int,
+        upperBound: Int
+    ) -> Bool {
         guard index >= 0, index + count <= chars.count else { return false }
-        let prev = index > 0 ? chars[index - 1] : nil
-        let next = (index + count) < chars.count ? chars[index + count] : nil
-
+        let prev = index > lowerBound ? chars[index - 1] : nil
+        let next = (index + count) < upperBound ? chars[index + count] : nil
         let leftFlanking = isLeftFlankingDelimiterRun(prev: prev, next: next)
         guard leftFlanking else { return false }
         if marker != "_" { return true }
@@ -4423,11 +5918,17 @@ enum NativeMarkdownCodec {
         return !rightFlanking || isPunctuation(prev)
     }
 
-    private static func canCloseDelimiter(_ marker: Character, count: Int, in chars: [Character], at index: Int) -> Bool {
+    private static func canCloseDelimiter(
+        _ marker: Character,
+        count: Int,
+        in chars: [Character],
+        at index: Int,
+        lowerBound: Int,
+        upperBound: Int
+    ) -> Bool {
         guard index >= 0, index + count <= chars.count else { return false }
-        let prev = index > 0 ? chars[index - 1] : nil
-        let next = (index + count) < chars.count ? chars[index + count] : nil
-
+        let prev = index > lowerBound ? chars[index - 1] : nil
+        let next = (index + count) < upperBound ? chars[index + count] : nil
         let rightFlanking = isRightFlankingDelimiterRun(prev: prev, next: next)
         guard rightFlanking else { return false }
         if marker != "_" { return true }
@@ -4465,9 +5966,9 @@ enum NativeMarkdownCodec {
         return ch.isPunctuation || ch.isSymbol
     }
 
-    private static func parseInlineMath(_ chars: [Character], startIndex: Int, baseFont: NSFont) -> InlineParseResult? {
-        guard startIndex < chars.count, chars[startIndex] == "$" else { return nil }
-        guard startIndex + 1 < chars.count else { return nil }
+    private static func parseInlineMath(_ chars: [Character], startIndex: Int, limit: Int, baseFont: NSFont) -> InlineParseResult? {
+        guard startIndex < limit, chars[startIndex] == "$" else { return nil }
+        guard startIndex + 1 < limit else { return nil }
 
         let next = chars[startIndex + 1]
         // Avoid interpreting currency as math (`$5`).
@@ -4477,7 +5978,7 @@ enum NativeMarkdownCodec {
 
         var i = startIndex + 1
         var escaped = false
-        while i < chars.count {
+        while i < limit {
             let ch = chars[i]
             if escaped {
                 escaped = false
@@ -4490,11 +5991,11 @@ enum NativeMarkdownCodec {
                 continue
             }
             if ch == "$" {
-                let expr = String(chars[(startIndex + 1)..<i])
+                let expr = materializeCharacters(chars, range: (startIndex + 1)..<i)
                 guard !expr.isEmpty else { return nil }
                 guard !expr.contains("\n") else { return nil }
                 guard !expr.hasPrefix(" "), !expr.hasSuffix(" ") else { return nil }
-                let source = "$\(expr)$"
+                let source = materializeCharacters(chars, range: startIndex..<(i + 1))
                 let attr = makeInlineMathAttributed(expression: expr, sourceMarkdown: source, baseFont: baseFont)
                 return InlineParseResult(attributed: attr, nextIndex: i + 1)
             }
@@ -4503,62 +6004,68 @@ enum NativeMarkdownCodec {
         return nil
     }
 
-    private static func parseImage(_ chars: [Character], startIndex: Int, ctx: ImportContext) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: Int)? {
-        guard startIndex + 1 < chars.count, chars[startIndex] == "!", chars[startIndex + 1] == "[" else { return nil }
-        guard let alt = parseBracketContent(chars, openIndex: startIndex + 1) else { return nil }
+    private static func parseImage(_ chars: [Character], startIndex: Int, limit: Int, ctx: ImportContext) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: Int)? {
+        guard startIndex + 1 < limit, chars[startIndex] == "!", chars[startIndex + 1] == "[" else { return nil }
+        guard let alt = parseBracketContent(chars, openIndex: startIndex + 1, limit: limit) else { return nil }
+        let altText = materializeCharacters(chars, range: alt.contentRange)
 
         // Inline destination: ![alt](url "title")
-        if alt.nextIndex < chars.count, chars[alt.nextIndex] == "(",
-           let target = parseInlineLinkDestination(chars, openParenIndex: alt.nextIndex)
+        if alt.nextIndex < limit, chars[alt.nextIndex] == "(",
+           let target = parseInlineLinkDestination(chars, openParenIndex: alt.nextIndex, limit: limit)
         {
-            let titleSuffix = target.title.map { " \"\($0)\"" } ?? ""
-            let source = "![\(alt.text)](\(target.destination)\(titleSuffix))"
-            return (alt.text, target.destination, source, target.nextIndex)
+            let destination = materializeCharacters(chars, range: target.destinationRange)
+            let source = materializeCharacters(chars, range: startIndex..<target.nextIndex)
+            return (altText, destination, source, target.nextIndex)
         }
 
         // Reference destination: ![alt][id]
-        if alt.nextIndex < chars.count, chars[alt.nextIndex] == "[",
-           let ref = parseBracketContent(chars, openIndex: alt.nextIndex)
+        if alt.nextIndex < limit, chars[alt.nextIndex] == "[",
+           let ref = parseBracketContent(chars, openIndex: alt.nextIndex, limit: limit)
         {
-            let refID = ref.text.isEmpty ? alt.text : ref.text
+            let refID = ref.contentRange.isEmpty ? altText : materializeCharacters(chars, range: ref.contentRange)
             if let def = ctx.referenceDefinitions[refID.lowercased()] {
-                let source = "![\(alt.text)][\(refID)]"
-                return (alt.text, def.destination, source, ref.nextIndex)
+                let source = materializeCharacters(chars, range: startIndex..<ref.nextIndex)
+                return (altText, def.destination, source, ref.nextIndex)
             }
         }
 
         return nil
     }
 
-    private static func parseLink(_ chars: [Character], startIndex: Int, parentStyle: InlineStyle, baseFont: NSFont, ctx: ImportContext) -> InlineParseResult? {
-        guard let linkText = parseBracketContent(chars, openIndex: startIndex) else { return nil }
+    private static func parseLink(_ chars: [Character], startIndex: Int, limit: Int, parentStyle: InlineStyle, baseFont: NSFont, ctx: ImportContext) -> InlineParseResult? {
+        guard let linkText = parseBracketContent(chars, openIndex: startIndex, limit: limit) else { return nil }
         // Keep empty link labels literal to avoid dropping syntax during round-trip (`[](...)`).
-        guard !linkText.text.isEmpty else { return nil }
+        guard !linkText.contentRange.isEmpty else { return nil }
         // Defer complex labels we don't serialize correctly yet (nested links/images, mixed inline-code + emphasis).
         // Keeping them literal preserves strict markdown round-trip semantics until the full inline parser lands.
-        let allowRichLabelParsing = shouldParseSimpleLinkLabel(linkText.text)
+        let linkLabel = materializeCharacters(chars, range: linkText.contentRange)
+        let allowRichLabelParsing = shouldParseSimpleLinkLabel(linkLabel)
 
         // Inline destination: [text](url "title")
-        if linkText.nextIndex < chars.count, chars[linkText.nextIndex] == "(",
-           let target = parseInlineLinkDestination(chars, openParenIndex: linkText.nextIndex)
+        if linkText.nextIndex < limit, chars[linkText.nextIndex] == "(",
+           let target = parseInlineLinkDestination(chars, openParenIndex: linkText.nextIndex, limit: limit)
         {
             if !allowRichLabelParsing {
-                let literalEnd = extendedLiteralLinkEndIndex(chars: chars, initialEnd: target.nextIndex, linkLabel: linkText.text)
+                let literalEnd = extendedLiteralLinkEndIndex(chars: chars, initialEnd: target.nextIndex, linkLabelRange: linkText.contentRange)
                 return makeSourceLiteralResult(chars: chars, startIndex: startIndex, nextIndex: literalEnd, baseFont: baseFont, style: parentStyle)
             }
-            let resolvedDestination = unescapeMarkdownBackslashes(target.destination)
-            guard let url = resolvedLinkURL(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
+            let rawDestination = materializeCharacters(chars, range: target.destinationRange)
+            let resolvedDestination = unescapeMarkdownBackslashes(rawDestination)
+            guard let linkValue = inlineLinkValue(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
             var linkStyle = parentStyle
-            linkStyle.link = url
-            linkStyle.linkDestination = target.destination
+            linkStyle.link = linkValue
+            linkStyle.linkDestination = rawDestination
             linkStyle.autolink = false
-            linkStyle.linkTitle = target.title
+            let rawTitle = target.titleRange.map { materializeCharacters(chars, range: $0) }
+            linkStyle.linkTitle = rawTitle
             linkStyle.linkReferenceID = nil
             linkStyle.linkReferenceURL = nil
-            let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle, ctx: ctx))
+            let inner = NSMutableAttributedString(
+                attributedString: parseInline(linkLabel, baseFont: baseFont, style: linkStyle, ctx: ctx)
+            )
             if inner.length > 0 {
-                inner.addAttribute(.kernLinkDestination, value: target.destination, range: NSRange(location: 0, length: inner.length))
-                if let title = target.title {
+                inner.addAttribute(.kernLinkDestination, value: rawDestination, range: NSRange(location: 0, length: inner.length))
+                if let title = rawTitle {
                     inner.addAttribute(.kernLinkTitle, value: title, range: NSRange(location: 0, length: inner.length))
                 }
             }
@@ -4566,26 +6073,28 @@ enum NativeMarkdownCodec {
         }
 
         // Reference destination: [text][id]
-        if linkText.nextIndex < chars.count, chars[linkText.nextIndex] == "[",
-           let ref = parseBracketContent(chars, openIndex: linkText.nextIndex)
+        if linkText.nextIndex < limit, chars[linkText.nextIndex] == "[",
+           let ref = parseBracketContent(chars, openIndex: linkText.nextIndex, limit: limit)
         {
             if !allowRichLabelParsing {
-                let literalEnd = extendedLiteralLinkEndIndex(chars: chars, initialEnd: ref.nextIndex, linkLabel: linkText.text)
+                let literalEnd = extendedLiteralLinkEndIndex(chars: chars, initialEnd: ref.nextIndex, linkLabelRange: linkText.contentRange)
                 return makeSourceLiteralResult(chars: chars, startIndex: startIndex, nextIndex: literalEnd, baseFont: baseFont, style: parentStyle)
             }
-            let refID = ref.text.isEmpty ? linkText.text : ref.text
+            let refID = ref.contentRange.isEmpty ? linkLabel : materializeCharacters(chars, range: ref.contentRange)
             if let definition = ctx.referenceDefinitions[refID.lowercased()] {
                 let resolvedDestination = unescapeMarkdownBackslashes(definition.destination)
-                guard let url = resolvedLinkURL(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
+                guard let linkValue = inlineLinkValue(from: resolvedDestination, baseURL: ctx.baseURL) else { return nil }
                 var linkStyle = parentStyle
-                linkStyle.link = url
+                linkStyle.link = linkValue
                 linkStyle.linkDestination = nil
                 linkStyle.autolink = false
                 linkStyle.linkTitle = definition.title
                 linkStyle.linkReferenceID = definition.id
                 linkStyle.linkReferenceURL = definition.destination
 
-                let inner = NSMutableAttributedString(attributedString: parseInline(linkText.text, baseFont: baseFont, style: linkStyle, ctx: ctx))
+                let inner = NSMutableAttributedString(
+                    attributedString: parseInline(linkLabel, baseFont: baseFont, style: linkStyle, ctx: ctx)
+                )
                 if inner.length > 0 {
                     inner.addAttribute(.kernLinkReferenceID, value: definition.id, range: NSRange(location: 0, length: inner.length))
                     inner.addAttribute(.kernLinkReferenceURL, value: definition.destination, range: NSRange(location: 0, length: inner.length))
@@ -4608,17 +6117,20 @@ enum NativeMarkdownCodec {
         style: InlineStyle
     ) -> InlineParseResult? {
         guard nextIndex > startIndex, nextIndex <= chars.count else { return nil }
-        let source = String(chars[startIndex..<nextIndex])
-        let attr = NSMutableAttributedString(attributedString: makeInlineAttributed(source, baseFont: baseFont, style: style))
+        let sourceMarkdown = String(chars[startIndex..<nextIndex])
+        let attr = NSMutableAttributedString(attributedString: makeInlineAttributed(sourceMarkdown, baseFont: baseFont, style: style))
         if attr.length > 0 {
-            attr.addAttribute(.kernSourceMarkdown, value: source, range: NSRange(location: 0, length: attr.length))
+            attr.addAttribute(.kernSourceMarkdown, value: sourceMarkdown, range: NSRange(location: 0, length: attr.length))
         }
         return InlineParseResult(attributed: attr, nextIndex: nextIndex)
     }
 
-    private static func extendedLiteralLinkEndIndex(chars: [Character], initialEnd: Int, linkLabel: String) -> Int {
+    private static func extendedLiteralLinkEndIndex(chars: [Character], initialEnd: Int, linkLabelRange: Range<Int>) -> Int {
         var end = initialEnd
-        let backtickCount = linkLabel.filter { $0 == "`" }.count
+        var backtickCount = 0
+        for index in linkLabelRange where chars[index] == "`" {
+            backtickCount += 1
+        }
         // CommonMark edge case: `[foo`](/uri)` and `[foo`][ref]` should remain literal.
         if backtickCount % 2 != 0, end < chars.count, chars[end] == "`" {
             end += 1
@@ -4640,12 +6152,20 @@ enum NativeMarkdownCodec {
         return true
     }
 
-    private static func makeInlineAttributed(_ text: String, baseFont: NSFont, style: InlineStyle) -> NSAttributedString {
+    private static func makeInlineAttributed(
+        _ text: String,
+        baseFont: NSFont,
+        style: InlineStyle
+    ) -> NSAttributedString {
         let font = cachedInlineFont(baseFont: baseFont, style: style)
-        var attrs = cachedInlineAttributesWithoutLink(baseFont: baseFont, style: style, font: font)
+        var attrs = cachedInlineAttributesWithoutLink(
+            baseFont: baseFont,
+            style: style,
+            font: font
+        )
 
         if !style.code, let link = style.link {
-            attrs[.link] = link
+            attrs[.link] = link.attributeValue
             attrs[.foregroundColor] = NativeEditorAppearance.linkColor()
             attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
             if let destination = style.linkDestination {
@@ -4664,7 +6184,6 @@ enum NativeMarkdownCodec {
                 attrs[.kernLinkReferenceURL] = refURL
             }
         }
-
         return NSAttributedString(string: text, attributes: attrs)
     }
 
@@ -5135,13 +6654,13 @@ enum NativeMarkdownCodec {
         return longest
     }
 
-    private static func indexOf(_ needle: String, in chars: [Character], start: Int) -> Int? {
-        guard !needle.isEmpty, start < chars.count else { return nil }
+    private static func indexOf(_ needle: String, in chars: [Character], start: Int, limit: Int) -> Int? {
+        guard !needle.isEmpty, start < limit else { return nil }
         let nChars = Array(needle)
-        guard nChars.count <= chars.count - start else { return nil }
+        guard nChars.count <= limit - start else { return nil }
 
         var i = start
-        while i <= chars.count - nChars.count {
+        while i <= limit - nChars.count {
             var matched = true
             for j in 0..<nChars.count where chars[i + j] != nChars[j] {
                 matched = false
@@ -5225,19 +6744,77 @@ enum NativeMarkdownCodec {
         case tab
     }
 
+    private enum ContinuationJoinKind {
+        case paragraph
+        case list
+    }
+
+    private struct ContinuationTextBuilder {
+        private let kind: ContinuationJoinKind
+        private var buffer: String
+        private var containsInlineSyntax: Bool
+
+        init(initial: String, kind: ContinuationJoinKind) {
+            self.kind = kind
+            buffer = initial
+            buffer.reserveCapacity(max(initial.utf16.count + 32, initial.utf16.count))
+            containsInlineSyntax = NativeMarkdownCodec.containsInlineSyntax(in: initial)
+        }
+
+        mutating func append(_ nextText: String, pendingHardBreak: HardBreakMarker?) {
+            switch kind {
+            case .paragraph:
+                buffer.append(pendingHardBreak != nil ? "\u{2028}" : "\n")
+            case .list:
+                if let pendingHardBreak {
+                    let hardBreakLiteral = NativeMarkdownCodec.hardBreakLiteral(pendingHardBreak)
+                    if !containsInlineSyntax, NativeMarkdownCodec.containsInlineSyntax(in: hardBreakLiteral) {
+                        containsInlineSyntax = true
+                    }
+                    buffer.append(hardBreakLiteral)
+                }
+                buffer.append("\u{2028}")
+            }
+            buffer.append(nextText)
+            if !containsInlineSyntax, NativeMarkdownCodec.containsInlineSyntax(in: nextText) {
+                containsInlineSyntax = true
+            }
+        }
+
+        mutating func build(finalHardBreak: HardBreakMarker?) -> (text: String, containsInlineSyntax: Bool) {
+            if let finalHardBreak {
+                let hardBreakLiteral = NativeMarkdownCodec.hardBreakLiteral(finalHardBreak)
+                if !containsInlineSyntax, NativeMarkdownCodec.containsInlineSyntax(in: hardBreakLiteral) {
+                    containsInlineSyntax = true
+                }
+                buffer.append(hardBreakLiteral)
+            }
+            return (buffer, containsInlineSyntax)
+        }
+    }
+
+    private static func hasOddBacktickParity(_ text: String) -> Bool {
+        var odd = false
+        for ch in text where ch == "`" {
+            odd.toggle()
+        }
+        return odd
+    }
+
     private static func stripHardBreakMarker(_ text: String, ctx: ImportContext) -> (text: String, hardBreak: HardBreakMarker?) {
         if ctx.strictConformanceRoundTripMode {
             return (text, nil)
         }
-        let backtickCount = text.filter { $0 == "`" }.count
-        if backtickCount % 2 != 0 {
-            // Avoid converting trailing spaces/backslashes inside multiline code spans.
-            return (text, nil)
-        }
         if text.hasSuffix("\\") {
+            if hasOddBacktickParity(text) {
+                return (text, nil)
+            }
             return (String(text.dropLast()), .backslash)
         }
         if text.hasSuffix("\t") {
+            if hasOddBacktickParity(text) {
+                return (text, nil)
+            }
             return (String(text.dropLast()), .tab)
         }
         var trailingSpaces = 0
@@ -5249,6 +6826,9 @@ enum NativeMarkdownCodec {
             idx = prev
         }
         if trailingSpaces >= 2 {
+            if hasOddBacktickParity(text) {
+                return (text, nil)
+            }
             return (String(text[..<idx]), .spaces(trailingSpaces))
         }
         return (text, nil)
@@ -5322,10 +6902,30 @@ enum NativeMarkdownCodec {
         return nil
     }
 
+    private static func inlineLinkValue(from raw: String, baseURL: URL?) -> InlineLinkValue? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let resolved = resolvedLinkURL(from: trimmed, baseURL: baseURL) {
+            return .url(resolved)
+        }
+        guard normalizedLinkURL(from: trimmed) != nil else { return nil }
+        return .raw(trimmed)
+    }
+
     private static func resolvedLinkURL(from raw: String, baseURL: URL?) -> URL? {
         let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsed = normalizedLinkURL(from: trimmedRaw) else { return nil }
-        guard parsed.scheme == nil else { return parsed }
+        if let scheme = parsed.scheme {
+            let lowercasedScheme = scheme.lowercased()
+            switch lowercasedScheme {
+            case "http", "https", "mailto":
+                return parsed
+            case "file":
+                return nil
+            default:
+                return nil
+            }
+        }
 
         // Preserve pure fragment links for in-document anchor handling.
         if parsed.path.isEmpty {
@@ -5336,30 +6936,36 @@ enum NativeMarkdownCodec {
             return normalizedWebURL
         }
 
-        if parsed.path.hasPrefix("/") {
-            var components = URLComponents(url: URL(fileURLWithPath: parsed.path).standardizedFileURL, resolvingAgainstBaseURL: false)
+        guard !parsed.path.hasPrefix("/"), !parsed.path.hasPrefix("~/") else { return nil }
+        guard let baseURL else { return nil }
+
+        if baseURL.isFileURL {
+            guard let baseDirectory = trustedLinkBaseDirectory(baseURL: baseURL) else { return nil }
+            let resolved = URL(fileURLWithPath: parsed.path, relativeTo: baseDirectory).standardizedFileURL
+            guard isContainedWithinTrustedLinkBase(resolved, baseDirectory: baseDirectory) else { return nil }
+            var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
             components?.query = parsed.query
             components?.fragment = parsed.fragment
             return components?.url
         }
 
-        // Support `~/...` destinations as local file paths.
-        if parsed.path.hasPrefix("~/") {
-            let home = NSHomeDirectory() as NSString
-            let expanded = home.appendingPathComponent(String(parsed.path.dropFirst(2)))
-            var components = URLComponents(url: URL(fileURLWithPath: expanded).standardizedFileURL, resolvingAgainstBaseURL: false)
-            components?.query = parsed.query
-            components?.fragment = parsed.fragment
-            return components?.url
-        }
+        guard let resolved = URL(string: trimmedRaw, relativeTo: baseURL)?.absoluteURL else { return nil }
+        return resolved
+    }
 
-        guard let baseURL else { return parsed }
-        let baseDirectory = baseURL.deletingLastPathComponent()
-        let resolved = URL(fileURLWithPath: parsed.path, relativeTo: baseDirectory).standardizedFileURL
-        var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
-        components?.query = parsed.query
-        components?.fragment = parsed.fragment
-        return components?.url
+    private static func trustedLinkBaseDirectory(baseURL: URL?) -> URL? {
+        guard let baseURL, baseURL.isFileURL else { return nil }
+        return baseURL.deletingLastPathComponent().standardizedFileURL
+    }
+
+    private static func isContainedWithinTrustedLinkBase(_ url: URL, baseDirectory: URL) -> Bool {
+        let urlPath = resolvedTrustedLocalPath(url)
+        let basePath = resolvedTrustedLocalPath(baseDirectory)
+        return urlPath == basePath || urlPath.hasPrefix(basePath + "/")
+    }
+
+    private static func resolvedTrustedLocalPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     private static func normalizedBareWebURL(from raw: String) -> URL? {

@@ -5,9 +5,8 @@ final class CodeBlockLanguagePillView: NSView {
     private let label = NSTextField(labelWithString: "")
 
     private let paddingX: CGFloat = 8
-    // Slightly taller vertical padding to avoid the optical impression of the text
-    // touching the pill edge in dark mode.
-    private let paddingY: CGFloat = 7
+    // Keep enough breathing room in dark mode without inflating the always-on header band.
+    private let paddingY: CGFloat = 4
 
     var stringValue: String {
         get { label.stringValue }

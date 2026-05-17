@@ -13,6 +13,7 @@ extension NSAttributedString.Key {
     static let kernListMarkerPadding = NSAttributedString.Key("kern.listMarkerPadding") // String (exact whitespace after list marker)
     static let kernListIndent = NSAttributedString.Key("kern.listIndent") // Int (leading spaces to export)
     static let kernListDepth = NSAttributedString.Key("kern.listDepth") // Int (nesting depth for rendering)
+    static let kernMarkerAdvance = NSAttributedString.Key("kern.markerAdvance") // CGFloat (precomputed visible marker width for wrapped-line alignment)
     static let kernQuoteDepth = NSAttributedString.Key("kern.quoteDepth") // Int
 
     static let kernStrong = NSAttributedString.Key("kern.strong") // Bool

@@ -1,4 +1,7 @@
 # Research: README Best Practices For Kern
+
+> Historical research note retained for reference. It is not part of the active contributor quick-start path.
+
 Date: 2026-02-17
 Depth: Full
 

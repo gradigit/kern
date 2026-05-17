@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 
 final class MarkdownImageAttachment: NSTextAttachment {
     enum LoadState {
@@ -9,6 +10,9 @@ final class MarkdownImageAttachment: NSTextAttachment {
     }
 
     nonisolated static let remoteImageLoadingUserDefaultsKey = "nativeEditor.remoteImageLoadingEnabled"
+    private nonisolated(unsafe) static let remoteResponseMaxBytes = 20 * 1024 * 1024
+    private nonisolated(unsafe) static let defaultMaxDecodedPixelCount = 40_000_000
+    private nonisolated(unsafe) static let defaultMaxDecodedDimension = 12_000
 
     let altText: String
     let destination: String
@@ -32,6 +36,43 @@ final class MarkdownImageAttachment: NSTextAttachment {
         cache.countLimit = 256
         return cache
     }()
+
+    nonisolated(unsafe) private static var remoteImageSession: URLSession = {
+        makeRemoteImageSession()
+    }()
+
+    nonisolated(unsafe) private static var remoteImageProtocolClassesOverride: [AnyClass]?
+    nonisolated(unsafe) private static var maxDecodedPixelCount = defaultMaxDecodedPixelCount
+    nonisolated(unsafe) private static var maxDecodedDimension = defaultMaxDecodedDimension
+
+    private static func makeRemoteImageSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .returnCacheDataElseLoad
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 12
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.urlCache = URLCache(memoryCapacity: 32 * 1024 * 1024, diskCapacity: 0, diskPath: nil)
+        configuration.urlCredentialStorage = nil
+        configuration.protocolClasses = remoteImageProtocolClassesOverride
+        return URLSession(configuration: configuration)
+    }
+
+    static func resetImageCacheForTesting() {
+        cache.removeAllObjects()
+    }
+
+    static func configureRemoteImageProtocolClassesForTesting(_ classes: [AnyClass]?) {
+        remoteImageSession.invalidateAndCancel()
+        remoteImageProtocolClassesOverride = classes
+        remoteImageSession = makeRemoteImageSession()
+    }
+
+    static func configureDecodeLimitsForTesting(maxPixelCount: Int? = nil, maxDimension: Int? = nil) {
+        Self.maxDecodedPixelCount = maxPixelCount ?? defaultMaxDecodedPixelCount
+        Self.maxDecodedDimension = maxDimension ?? defaultMaxDecodedDimension
+    }
 
     init(
         altText: String,
@@ -126,7 +167,7 @@ final class MarkdownImageAttachment: NSTextAttachment {
             loadState = .loading
             let fileURL = url
             DispatchQueue.global(qos: .userInitiated).async {
-                let image = NSImage(contentsOf: fileURL)
+                let image = Self.validatedImage(fromFileURL: fileURL)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.isLoading = false
@@ -148,12 +189,17 @@ final class MarkdownImageAttachment: NSTextAttachment {
         loadState = .loading
 
         let req = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 8)
-        URLSession.shared.dataTask(with: req) { data, _, error in
+        Self.remoteImageSession.dataTask(with: req) { data, response, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isLoading = false
 
-                guard error == nil, let data, let image = NSImage(data: data) else {
+                guard error == nil,
+                      let data,
+                      let response = response as? HTTPURLResponse,
+                      Self.remoteResponseLooksSafe(response: response, data: data),
+                      let image = Self.validatedImage(fromRemoteData: data)
+                else {
                     self.loadState = .failed
                     self.requestDisplayUpdate()
                     return
@@ -166,6 +212,59 @@ final class MarkdownImageAttachment: NSTextAttachment {
                 self.requestDisplayUpdate()
             }
         }.resume()
+    }
+
+    private static func remoteResponseLooksSafe(response: HTTPURLResponse, data: Data) -> Bool {
+        guard (200..<300).contains(response.statusCode) else { return false }
+        if let mimeType = response.mimeType?.lowercased(), !mimeType.hasPrefix("image/") {
+            return false
+        }
+        if let contentLength = response.value(forHTTPHeaderField: "Content-Length"),
+           let bytes = Int(contentLength),
+           bytes > remoteResponseMaxBytes {
+            return false
+        }
+        return data.count <= remoteResponseMaxBytes
+    }
+
+    private static func validatedImage(fromFileURL fileURL: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+              imageSourceLooksSafe(source)
+        else {
+            return nil
+        }
+        return makeImage(from: source)
+    }
+
+    private static func validatedImage(fromRemoteData data: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              imageSourceLooksSafe(source)
+        else {
+            return nil
+        }
+        return makeImage(from: source)
+    }
+
+    private static func imageSourceLooksSafe(_ source: CGImageSource) -> Bool {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              width > 0,
+              height > 0
+        else {
+            return false
+        }
+
+        guard width <= maxDecodedDimension, height <= maxDecodedDimension else { return false }
+        let pixelCount = Int64(width) * Int64(height)
+        return pixelCount > 0 && pixelCount <= Int64(maxDecodedPixelCount)
+    }
+
+    private static func makeImage(from source: CGImageSource) -> NSImage? {
+        guard let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
     private func requestDisplayUpdate() {
@@ -238,27 +337,50 @@ final class MarkdownImageAttachment: NSTextAttachment {
         guard !trimmed.isEmpty else { return nil }
 
         if let absolute = URL(string: trimmed), absolute.scheme != nil {
+            guard let scheme = absolute.scheme?.lowercased() else { return nil }
+            if absolute.isFileURL {
+                return nil
+            }
+            guard scheme == "http" || scheme == "https" else {
+                return nil
+            }
             return absolute
         }
 
         let unescaped = trimmed.removingPercentEncoding ?? trimmed
-        let path = NSString(string: unescaped).expandingTildeInPath
+        let path = NSString(string: unescaped)
 
-        if path.hasPrefix("/") {
-            return URL(fileURLWithPath: path)
+        if unescaped.hasPrefix("~") || path.isAbsolutePath {
+            return nil
         }
 
-        if let baseURL {
-            let baseDir: URL
-            if baseURL.hasDirectoryPath {
-                baseDir = baseURL
-            } else {
-                baseDir = baseURL.deletingLastPathComponent()
+        if let baseDirectory = trustedAttachmentBaseDirectory(baseURL: baseURL) {
+            let resolved = baseDirectory.appendingPathComponent(unescaped).standardizedFileURL
+            if isContainedWithinTrustedBase(resolved, baseDirectory: baseDirectory) {
+                return resolved
             }
-            return baseDir.appendingPathComponent(path).standardizedFileURL
         }
 
-        return URL(fileURLWithPath: path).standardizedFileURL
+        return nil
+    }
+
+    private static func trustedAttachmentBaseDirectory(baseURL: URL?) -> URL? {
+        guard let baseURL, baseURL.isFileURL else { return nil }
+        if baseURL.hasDirectoryPath {
+            return baseURL.standardizedFileURL
+        }
+        return baseURL.deletingLastPathComponent().standardizedFileURL
+    }
+
+    private static func isContainedWithinTrustedBase(_ url: URL, baseDirectory: URL) -> Bool {
+        let basePath = resolvedTrustedLocalPath(baseDirectory)
+        let candidatePath = resolvedTrustedLocalPath(url)
+        if candidatePath == basePath { return true }
+        return candidatePath.hasPrefix(basePath.hasSuffix("/") ? basePath : basePath + "/")
+    }
+
+    private static func resolvedTrustedLocalPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     /// Estimate decoded RGBA memory footprint so NSCache can evict by memory pressure.

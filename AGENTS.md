@@ -14,9 +14,9 @@ This plan is the source of truth for what “exhaustive” means. If tests are g
 
 ## Where To Work
 
-- Work only in this repo: `/Users/aaaaa/Projects/Kern-textkit`
-- Do not modify the legacy repo at `/Users/aaaaa/Projects/Kern-webkit` unless explicitly requested.
-  - Compatibility symlink currently exists at `/Users/aaaaa/Projects/Kern -> /Users/aaaaa/Projects/Kern-textkit`.
+- Work only in this repository.
+- Do not modify sibling or legacy repositories unless explicitly requested.
+- Maintainer-local operational docs may exist under `docs/internal/` in local maintainer worktrees; tracked root bootstrap files are public-safe stubs.
 
 ## Core Commands
 

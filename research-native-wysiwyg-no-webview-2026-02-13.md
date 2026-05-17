@@ -1,4 +1,7 @@
 # Research: Native macOS WYSIWYG Markdown Editor Engine (No WebView)
+
+> Historical research note retained for reference. It is not part of the active contributor quick-start path.
+
 Date: 2026-02-13
 Depth: Full
 

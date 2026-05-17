@@ -13,6 +13,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+.codex/
 
 # Xcode
 build/
@@ -50,6 +51,11 @@ dist/
 benchmark-archive/
 scripts/kern-bench/benchmark-archive/
 tmp/
+.cache/
+.swift-module-cache/
+.tmp-clang-module-cache/
+.tmp-home/
+.tool-home/
 .study/
 .derived-data-release/
 FORGE-STATUS.*.md
@@ -61,7 +67,7 @@ FORGE-STATUS.*.md
 __pycache__/
 *.pyc
 
-# Claude workspace settings and session context (local only)
+# Agent workspace settings and session context (local only)
 .claude/
 CONTEXT-RESTORE.md
 .worktrees
@@ -69,8 +75,12 @@ CONTEXT-RESTORE.md
 # Handoff/session artifacts (local only)
 .handoff-fresh/
 HANDOFF.auto.md
+HUMAN-INPUT.md
+MISSION-CONTROL.md
+SUGGESTIONS.md
+docs/internal/
 
-# Research/internal development scratch artifacts (local only)
+# Untracked research/internal development scratch artifacts (local only)
 architect/
 benchmark-history/
 research-*.md

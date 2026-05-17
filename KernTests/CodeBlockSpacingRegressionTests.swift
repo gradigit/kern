@@ -55,6 +55,16 @@ final class CodeBlockSpacingRegressionTests: XCTestCase {
         }
 
         XCTAssertGreaterThanOrEqual(lastCodeStyle.paragraphSpacing, 8)
-        XCTAssertLessThanOrEqual(abs(firstCodeStyle.paragraphSpacingBefore - lastCodeStyle.paragraphSpacing), 2)
+        XCTAssertGreaterThan(
+            firstCodeStyle.paragraphSpacingBefore,
+            lastCodeStyle.paragraphSpacing,
+            "The first code paragraph should reserve a larger persistent header band than the trailing bottom spacing"
+        )
+        XCTAssertEqual(
+            firstCodeStyle.paragraphSpacingBefore - CodeBlockChromeGeometry.backgroundInsetTop,
+            lastCodeStyle.paragraphSpacing - CodeBlockChromeGeometry.backgroundInsetBottom,
+            accuracy: 0.01,
+            "Top and bottom external spacing should stay balanced once the persistent header/bottom insets are removed"
+        )
     }
 }

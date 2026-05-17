@@ -113,6 +113,8 @@ final class NativeMarkdownCodecGfmMarkerCompatibilityTests: XCTestCase {
 
         let rawDestination = attr.attribute(.kernLinkDestination, at: range.location, effectiveRange: nil) as? String
         XCTAssertEqual(rawDestination, #"/bar\*"#)
+        let rawTitle = attr.attribute(.kernLinkTitle, at: range.location, effectiveRange: nil) as? String
+        XCTAssertEqual(rawTitle, #"ti\*tle"#)
 
         let exported = NativeMarkdownCodec.exportMarkdown(attr)
         XCTAssertEqual(exported, md)
@@ -215,6 +217,31 @@ final class NativeMarkdownCodecGfmMarkerCompatibilityTests: XCTestCase {
         """
         let out = NativeMarkdownCodec.exportMarkdown(NativeMarkdownCodec.importMarkdown(md))
         XCTAssertEqual(out, md)
+    }
+
+    @MainActor
+    func testCollapsedReferenceLinkPreservesReferenceMetadataCaseInsensitively() throws {
+        let md = """
+        [Foo][]
+
+        [fOo]: /bar "Title"
+        """
+        let attr = NativeMarkdownCodec.importMarkdown(md)
+
+        let ns = attr.string as NSString
+        let range = ns.range(of: "Foo")
+        XCTAssertNotEqual(range.location, NSNotFound)
+
+        let referenceID = attr.attribute(.kernLinkReferenceID, at: range.location, effectiveRange: nil) as? String
+        XCTAssertEqual(referenceID, "fOo")
+
+        let referenceURL = attr.attribute(.kernLinkReferenceURL, at: range.location, effectiveRange: nil) as? String
+        XCTAssertEqual(referenceURL, "/bar")
+
+        let title = attr.attribute(.kernLinkTitle, at: range.location, effectiveRange: nil) as? String
+        XCTAssertEqual(title, "Title")
+
+        XCTAssertNotNil(attr.attribute(.link, at: range.location, effectiveRange: nil))
     }
 
     @MainActor

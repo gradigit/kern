@@ -1,4 +1,7 @@
 # Research: Heading Checkbox Feature for Kern
+
+> Historical research note retained for reference. It is not part of the active contributor quick-start path.
+
 Date: 2026-02-05
 Depth: Full
 

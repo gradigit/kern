@@ -1,11 +1,14 @@
 #!/bin/bash
-# test-kern-app.sh — Build and smoke-test KernTextKit.app with mega-stress-test.md
+# test-kern-app.sh — Build and smoke-test Kern.app with mega-stress-test.md
 #
-# Usage: ./scripts/test-kern-app.sh [--skip-build] [--screenshots]
+# Usage:
+#   ./scripts/test-kern-app.sh [--skip-build] [--screenshots]
+#   ./scripts/test-kern-app.sh --packaged [--skip-build] [--screenshots]
+#   ./scripts/test-kern-app.sh --app /absolute/path/to/Kern.app [--skip-build] [--screenshots]
 #
 # Tests:
 #   1. XcodeGen + xcodebuild succeeds
-#   2. KernTextKit launches and opens a markdown file without crashing
+#   2. Kern launches and opens a markdown file without crashing
 #   4. Optional: capture scrolling screenshots for visual review
 #
 # Exit codes:
@@ -19,14 +22,38 @@ cd "$(dirname "$0")/.."
 
 SKIP_BUILD=false
 SCREENSHOTS=false
+USE_PACKAGED=false
+APP_OVERRIDE=""
 SCREENSHOT_DIR="$(cd "$(dirname "$0")/.."; pwd)/test-screenshots"
 KERN_PID=""
 TIMEOUT=15  # seconds to wait for editor ready
 
-for arg in "$@"; do
-  case "$arg" in
-    --skip-build) SKIP_BUILD=true ;;
-    --screenshots) SCREENSHOTS=true ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skip-build)
+      SKIP_BUILD=true
+      shift
+      ;;
+    --screenshots)
+      SCREENSHOTS=true
+      shift
+      ;;
+    --packaged)
+      USE_PACKAGED=true
+      shift
+      ;;
+    --app)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --app requires a path to an .app bundle" >&2
+        exit 1
+      fi
+      APP_OVERRIDE="$2"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 1
+      ;;
   esac
 done
 
@@ -43,11 +70,13 @@ echo ""
 
 # ── Step 1: Build ──────────────────────────────────────────────────────────
 
-if [ "$SKIP_BUILD" = false ]; then
+if [ -n "$APP_OVERRIDE" ] || [ "$USE_PACKAGED" = true ]; then
+  echo "▸ Step 1: Skipped (explicit app bundle selected)"
+elif [ "$SKIP_BUILD" = false ]; then
   echo "▸ Step 1: Generate Xcode project..."
   xcodegen 2>&1 | tail -1
 
-  echo "▸ Step 1: Build KernTextKit.app..."
+  echo "▸ Step 1: Build Kern.app..."
   BUILD_OUTPUT=$(xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit build 2>&1)
   if echo "$BUILD_OUTPUT" | grep -q "BUILD SUCCEEDED"; then
     echo "  ✓ Build succeeded"
@@ -60,14 +89,53 @@ else
   echo "▸ Step 1: Skipped (--skip-build)"
 fi
 
-# Find the built app
-KERN_APP=$(find ~/Library/Developer/Xcode/DerivedData/KernTextKit-*/Build/Products/Debug/KernTextKit.app -maxdepth 0 2>/dev/null | head -1)
-if [ -z "$KERN_APP" ]; then
-  echo "  ✗ Cannot find KernTextKit.app in DerivedData"
+if [ "$USE_PACKAGED" = true ] && [ -n "$APP_OVERRIDE" ]; then
+  echo "ERROR: use either --packaged or --app, not both" >&2
   exit 1
 fi
-KERN_BIN="$KERN_APP/Contents/MacOS/KernTextKit"
-echo "  App: $KERN_APP"
+
+if [ "$USE_PACKAGED" = true ]; then
+  KERN_APP="$(pwd)/dist/Kern.app"
+  if [ ! -d "$KERN_APP" ]; then
+    echo "  ✗ Packaged app not found at: $KERN_APP" >&2
+    echo "    Run ./scripts/package-kern-app.sh first." >&2
+    exit 1
+  fi
+elif [ -n "$APP_OVERRIDE" ]; then
+  case "$APP_OVERRIDE" in
+    /*) KERN_APP="$APP_OVERRIDE" ;;
+    *) KERN_APP="$(pwd)/$APP_OVERRIDE" ;;
+  esac
+  if [ ! -d "$KERN_APP" ]; then
+    echo "  ✗ App bundle not found at: $KERN_APP" >&2
+    exit 1
+  fi
+else
+  # Find the built app, preferring the renamed public bundle first.
+  KERN_APP=$(find ~/Library/Developer/Xcode/DerivedData/KernTextKit-*/Build/Products/Debug -maxdepth 0 -name 'Kern.app' 2>/dev/null | head -1)
+  if [ -z "$KERN_APP" ]; then
+    KERN_APP=$(find ~/Library/Developer/Xcode/DerivedData/KernTextKit-*/Build/Products/Debug -maxdepth 0 -name 'KernTextKit.app' 2>/dev/null | head -1)
+  fi
+  if [ -z "$KERN_APP" ]; then
+    echo "  ✗ Cannot find Kern.app in DerivedData" >&2
+    exit 1
+  fi
+fi
+
+if [ ! -d "$KERN_APP/Contents/MacOS" ]; then
+  echo "  ✗ Invalid app bundle (missing Contents/MacOS): $KERN_APP" >&2
+  exit 1
+fi
+KERN_BIN="$KERN_APP/Contents/MacOS/Kern"
+if [ ! -f "$KERN_BIN" ]; then
+  KERN_BIN="$KERN_APP/Contents/MacOS/KernTextKit"
+fi
+if [ ! -f "$KERN_BIN" ]; then
+  echo "  ✗ App binary not found inside bundle: $KERN_APP" >&2
+  exit 1
+fi
+KERN_PROCESS_NAME="$(basename "$KERN_APP" .app)"
+echo "  App bundle selected: $KERN_APP"
 echo ""
 
 # ── Step 2: Launch with test file ──────────────────────────────────────────
@@ -77,26 +145,26 @@ if [ ! -f "$TEST_FILE" ]; then
   TEST_FILE="test-fixtures/stress-test.md"
 fi
 
-echo "▸ Step 2: Launch KernTextKit with $TEST_FILE..."
+echo "▸ Step 2: Launch Kern with $TEST_FILE..."
 "$KERN_BIN" "$(pwd)/$TEST_FILE" &
 KERN_PID=$!
 sleep 3
 
 # Check if still running
 if ! kill -0 "$KERN_PID" 2>/dev/null; then
-  echo "  ✗ KernTextKit crashed on launch"
+  echo "  ✗ Kern crashed on launch"
   exit 2
 fi
-echo "  ✓ KernTextKit launched (PID $KERN_PID)"
+echo "  ✓ Kern launched (PID $KERN_PID)"
 
 # Resize window to left half of screen
-osascript <<'APPLESCRIPT'
+osascript <<APPLESCRIPT
 tell application "Finder"
     set _bounds to bounds of window of desktop
     set screenW to item 3 of _bounds
     set screenH to item 4 of _bounds
 end tell
-tell application "System Events" to tell process "KernTextKit"
+tell application "System Events" to tell process "$KERN_PROCESS_NAME"
     set frontmost to true
     tell window 1
         set position to {0, 25}
@@ -115,7 +183,7 @@ echo "▸ Step 3: Waiting for app to stabilize (${TIMEOUT}s timeout)..."
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
   if ! kill -0 "$KERN_PID" 2>/dev/null; then
-    echo "  ✗ KernTextKit crashed while loading"
+    echo "  ✗ Kern crashed while loading"
     exit 2
   fi
   sleep 1
@@ -123,7 +191,7 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 done
 
 # If we get here, Kern has been running for $TIMEOUT seconds without crashing
-echo "  ✓ KernTextKit running stable for ${TIMEOUT}s"
+echo "  ✓ Kern running stable for ${TIMEOUT}s"
 echo ""
 
 # ── Step 4: Optional screenshots ──────────────────────────────────────────
@@ -154,7 +222,7 @@ if [ "$SCREENSHOTS" = true ]; then
   fi
 
   # Activate Kern
-  osascript -e 'tell application "KernTextKit" to activate'
+  osascript -e "tell application \"$KERN_PROCESS_NAME\" to activate"
   sleep 1
 
   if [ ! -x "$SCROLL_HELPER" ]; then
@@ -218,10 +286,14 @@ fi
 # ── Step 5: Graceful shutdown ─────────────────────────────────────────────
 
 echo "▸ Step 5: Shutting down Kern..."
-kill "$KERN_PID" 2>/dev/null
-wait "$KERN_PID" 2>/dev/null || true
+if [ -n "$KERN_PID" ] && kill -0 "$KERN_PID" 2>/dev/null; then
+  kill "$KERN_PID" 2>/dev/null || true
+  wait "$KERN_PID" 2>/dev/null || true
+  echo "  ✓ Kern exited cleanly"
+else
+  echo "  ✓ Kern was already no longer running at shutdown"
+fi
 KERN_PID=""
-echo "  ✓ Kern exited cleanly"
 echo ""
 
 # ── Summary ───────────────────────────────────────────────────────────────
@@ -229,8 +301,12 @@ echo ""
 echo "=== All Tests Passed ==="
 echo ""
 echo "Results:"
-echo "  ✓ Xcode build succeeded"
-echo "  ✓ KernTextKit launches without crashing"
+if [ -n "$APP_OVERRIDE" ] || [ "$USE_PACKAGED" = true ] || [ "$SKIP_BUILD" = true ]; then
+  echo "  ✓ App bundle selection succeeded"
+else
+  echo "  ✓ Xcode build succeeded"
+fi
+echo "  ✓ Kern launches without crashing"
 echo "  ✓ Stable for ${TIMEOUT}s with large document"
 if [ "$SCREENSHOTS" = true ]; then
   echo "  ✓ Screenshots: $SCREENSHOT_DIR/"

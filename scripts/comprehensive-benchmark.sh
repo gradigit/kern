@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# KernTextKit Comprehensive Benchmark Script
+# Kern Comprehensive Benchmark Script
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests cold start, multi-tab open, memory, file open latency, auto-save/file
 # watcher debounce, and rapid tab switching.
@@ -21,18 +21,23 @@ TABS_DIR="$FIXTURES_DIR/tabs"
 RESULTS_FILE="$FIXTURES_DIR/benchmark-results.md"
 STRESS_FILE="$FIXTURES_DIR/stress-test.md"
 MEGA_STRESS_FILE="$FIXTURES_DIR/mega-stress-test.md"
+BENCHMARK_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kern-comprehensive.XXXXXX")"
+chmod 700 "$BENCHMARK_TMP_DIR"
 
-# Find KernTextKit.app from DerivedData
-KERN_APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData/KernTextKit-"*/Build/Products/Debug/KernTextKit.app -maxdepth 0 2>/dev/null | head -1)
+# Find Kern.app from DerivedData
+KERN_APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData/KernTextKit-"*/Build/Products/Debug \( -name 'Kern.app' -o -name 'KernTextKit.app' \) -maxdepth 0 2>/dev/null | head -1)
 
 if [ -z "$KERN_APP_PATH" ]; then
-    echo "ERROR: Cannot find KernTextKit.app in DerivedData."
+    echo "ERROR: Cannot find Kern.app in DerivedData."
     echo "       Build first: xcodebuild -project KernTextKit.xcodeproj -scheme KernTextKit build"
     exit 1
 fi
 
-KERN_BINARY="$KERN_APP_PATH/Contents/MacOS/KernTextKit"
-KERN_NAME="KernTextKit"
+KERN_BINARY="$KERN_APP_PATH/Contents/MacOS/Kern"
+if [ ! -f "$KERN_BINARY" ]; then
+    KERN_BINARY="$KERN_APP_PATH/Contents/MacOS/KernTextKit"
+fi
+KERN_NAME="Kern"
 
 RUNS=3
 SMALL_FILE=""
@@ -75,14 +80,86 @@ ms_to_s() {
     python3 -c "print(f'{int(\"$1\") / 1000:.3f}')" 2>/dev/null || echo "error"
 }
 
+KERN_PID_FILE="$BENCHMARK_TMP_DIR/kern-comprehensive-owned.pid"
+FILE_OPEN_DUMMY_FILE="$BENCHMARK_TMP_DIR/kern-bench-dummy.md"
+AUTOSAVE_TEMP_FILE="$BENCHMARK_TMP_DIR/kern-bench-autosave.md"
+
+cleanup_benchmark_tmp() {
+    rm -f "$KERN_PID_FILE"
+    rm -f "$FILE_OPEN_DUMMY_FILE"
+    rm -f "$AUTOSAVE_TEMP_FILE"
+    if [ -d "$BENCHMARK_TMP_DIR" ]; then
+        find "$BENCHMARK_TMP_DIR" -depth -mindepth 1 -delete
+        rmdir "$BENCHMARK_TMP_DIR" 2>/dev/null || true
+    fi
+}
+
+trap cleanup_benchmark_tmp EXIT
+
+kern_running_pids() {
+    pgrep -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null || \
+    pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
+}
+
+ensure_kern_idle_or_die() {
+    local running
+    running=$(kern_running_pids)
+    if [ -n "$running" ]; then
+        echo "ERROR: Kern is already running; refusing broad benchmark cleanup." >&2
+        exit 1
+    fi
+}
+
+remember_owned_kern_pid() {
+    local before_pids="${1:-}"
+    local current_pids
+    current_pids=$(kern_running_pids)
+    : > "$KERN_PID_FILE.tmp"
+    for pid in $current_pids; do
+        if ! printf '%s\n' "$before_pids" | grep -qx "$pid"; then
+            printf '%s\n' "$pid" >> "$KERN_PID_FILE.tmp"
+        fi
+    done
+    if [ ! -s "$KERN_PID_FILE.tmp" ] && [ -z "$before_pids" ] && [ -n "$current_pids" ]; then
+        printf '%s\n' "$current_pids" | head -n1 > "$KERN_PID_FILE.tmp"
+    fi
+    if [ -f "$KERN_PID_FILE" ]; then
+        cat "$KERN_PID_FILE" "$KERN_PID_FILE.tmp" | awk 'NF' | sort -u > "$KERN_PID_FILE.merged"
+        mv "$KERN_PID_FILE.merged" "$KERN_PID_FILE"
+        rm -f "$KERN_PID_FILE.tmp"
+    else
+        mv "$KERN_PID_FILE.tmp" "$KERN_PID_FILE"
+    fi
+}
+
+launch_kern() {
+    local before_pids
+    before_pids=$(kern_running_pids)
+    open -a "$KERN_APP_PATH" "$@"
+    sleep 0.1
+    remember_owned_kern_pid "$before_pids"
+}
+
 # ─── Kill Kern ────────────────────────────────────────────────────────────────
 
 kill_kern() {
-    pkill -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
-    osascript -e 'tell application "KernTextKit" to quit' 2>/dev/null || true
+    [ -f "$KERN_PID_FILE" ] || return 0
+    local owned_pids current_pids
+    owned_pids=$(cat "$KERN_PID_FILE" 2>/dev/null || true)
+    current_pids=$(kern_running_pids)
+    for pid in $current_pids; do
+        if printf '%s\n' "$owned_pids" | grep -qx "$pid"; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
     sleep 1
-    pkill -9 -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null || true
-    sleep 0.5
+    current_pids=$(kern_running_pids)
+    for pid in $current_pids; do
+        if printf '%s\n' "$owned_pids" | grep -qx "$pid"; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -f "$KERN_PID_FILE"
 }
 
 # ─── Wait for Kern process to be running ──────────────────────────────────────
@@ -91,7 +168,7 @@ wait_for_process() {
     local max_wait_ms="${1:-10000}"
     local start=$(now_ms)
     while true; do
-        if pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1; then
+        if pgrep -f "Kern.app/Contents/MacOS/Kern" > /dev/null 2>&1 || pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1; then
             local end=$(now_ms)
             echo $(elapsed_ms "$start" "$end")
             return 0
@@ -112,7 +189,7 @@ wait_for_window() {
     local start=$(now_ms)
     while true; do
         local count
-        count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
+        count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
         if [ "$count" -gt 0 ] 2>/dev/null; then
             local end=$(now_ms)
             echo $(elapsed_ms "$start" "$end")
@@ -130,6 +207,7 @@ wait_for_window() {
 # ─── Get Kern PID ────────────────────────────────────────────────────────────
 
 get_kern_pid() {
+    pgrep -f "Kern.app/Contents/MacOS/Kern" 2>/dev/null | head -1 || \
     pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" 2>/dev/null | head -1
 }
 
@@ -153,6 +231,7 @@ get_memory_mb() {
 # ─── Check if Kern is still alive ────────────────────────────────────────────
 
 kern_is_alive() {
+    pgrep -f "Kern.app/Contents/MacOS/Kern" > /dev/null 2>&1 || \
     pgrep -f "KernTextKit.app/Contents/MacOS/KernTextKit" > /dev/null 2>&1
 }
 
@@ -304,7 +383,7 @@ benchmark_cold_start() {
         kill_kern
         sleep 1
         local start=$(now_ms)
-        open -a "$KERN_APP_PATH"
+        launch_kern
         local process_time=$(wait_for_process 15000)
         local window_time=$(wait_for_window 15000)
         local end=$(now_ms)
@@ -324,7 +403,7 @@ benchmark_cold_start() {
         kill_kern
         sleep 1
         local start=$(now_ms)
-        open -a "$KERN_APP_PATH" "$SMALL_FILE"
+        launch_kern "$SMALL_FILE"
         local window_time=$(wait_for_window 15000)
         local end=$(now_ms)
         local total=$(elapsed_ms "$start" "$end")
@@ -343,7 +422,7 @@ benchmark_cold_start() {
         kill_kern
         sleep 1
         local start=$(now_ms)
-        open -a "$KERN_APP_PATH" "$LARGE_FILE"
+        launch_kern "$LARGE_FILE"
         local window_time=$(wait_for_window 20000)
         local end=$(now_ms)
         local total=$(elapsed_ms "$start" "$end")
@@ -385,13 +464,13 @@ benchmark_multi_tab() {
         sleep 1
 
         # Launch Kern fresh
-        open -a "$KERN_APP_PATH"
+        launch_kern
         wait_for_window 15000 > /dev/null
         sleep 2
 
         local start=$(now_ms)
         for i in $(seq 0 $(( count - 1 ))); do
-            open -a "$KERN_APP_PATH" "${tab_files[$i]}"
+            launch_kern "${tab_files[$i]}"
             # Small delay to avoid overwhelming the system
             sleep 0.2
         done
@@ -404,7 +483,7 @@ benchmark_multi_tab() {
 
         # Count windows
         local window_count
-        window_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "?")
+        window_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "?")
 
         local pid=$(get_kern_pid)
         local mem=$(get_memory_mb "$pid")
@@ -435,7 +514,7 @@ benchmark_memory() {
     kill_kern
     sleep 1
 
-    open -a "$KERN_APP_PATH"
+    launch_kern
     wait_for_window 15000 > /dev/null
     sleep 2
 
@@ -446,7 +525,7 @@ benchmark_memory() {
 
     echo "  Opening 55 tabs..."
     for i in $(seq 0 54); do
-        open -a "$KERN_APP_PATH" "${tab_files[$i]}"
+        launch_kern "${tab_files[$i]}"
         sleep 0.15
     done
 
@@ -497,9 +576,8 @@ benchmark_file_open_latency() {
     sleep 1
 
     # Start Kern with a dummy file
-    local dummy="/tmp/kern-bench-dummy.md"
-    echo "# Dummy" > "$dummy"
-    open -a "$KERN_APP_PATH" "$dummy"
+    echo "# Dummy" > "$FILE_OPEN_DUMMY_FILE"
+    launch_kern "$FILE_OPEN_DUMMY_FILE"
     wait_for_window 15000 > /dev/null
     sleep 3
 
@@ -514,17 +592,17 @@ benchmark_file_open_latency() {
         for i in $(seq 1 "$RUNS"); do
             # Get current window count
             local before_count
-            before_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
+            before_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
 
             local start=$(now_ms)
-            open -a "$KERN_APP_PATH" "$file"
+            launch_kern "$file"
 
             # Wait for window count to increase or title to change
             local max_wait=10000
             local waited=0
             while [ "$waited" -lt "$max_wait" ]; do
                 local current_count
-                current_count=$(osascript -e 'tell application "System Events" to count windows of process "KernTextKit"' 2>/dev/null || echo "0")
+                current_count=$(osascript -e 'tell application "System Events" to count windows of process "Kern"' 2>/dev/null || echo "0")
                 if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
                     break
                 fi
@@ -541,7 +619,7 @@ benchmark_file_open_latency() {
             sleep 0.5
             osascript -e '
                 tell application "System Events"
-                    tell process "KernTextKit"
+                    tell process "Kern"
                         keystroke "w" using {command down}
                     end tell
                 end tell
@@ -554,7 +632,7 @@ benchmark_file_open_latency() {
         eval "LATENCY_${label}_AVG=\"$avg\""
     done
 
-    rm -f "$dummy"
+    rm -f "$FILE_OPEN_DUMMY_FILE"
     kill_kern
 }
 
@@ -572,13 +650,12 @@ benchmark_autosave() {
     kill_kern
     sleep 1
 
-    local temp_file="/tmp/kern-bench-autosave-$(date +%s).md"
-    echo "# Auto-Save Test" > "$temp_file"
-    echo "" >> "$temp_file"
-    echo "Initial content for file watcher benchmark." >> "$temp_file"
+    echo "# Auto-Save Test" > "$AUTOSAVE_TEMP_FILE"
+    echo "" >> "$AUTOSAVE_TEMP_FILE"
+    echo "Initial content for file watcher benchmark." >> "$AUTOSAVE_TEMP_FILE"
 
     echo "  [5a] Opening temp file in Kern..."
-    open -a "$KERN_APP_PATH" "$temp_file"
+    launch_kern "$AUTOSAVE_TEMP_FILE"
     wait_for_window 15000 > /dev/null
     echo "  Waiting 3 seconds for editor to fully load..."
     sleep 3
@@ -586,7 +663,7 @@ benchmark_autosave() {
     # Single external modification
     echo "  [5b] Single external modification..."
     local start=$(now_ms)
-    echo "Modified line 1 - $(date +%s%N)" >> "$temp_file"
+    echo "Modified line 1 - $(date +%s%N)" >> "$AUTOSAVE_TEMP_FILE"
     sleep 2
     local end=$(now_ms)
     local single_mod_time=$(elapsed_ms "$start" "$end")
@@ -598,7 +675,7 @@ benchmark_autosave() {
     echo "  [5c] Rapid modifications (5 changes with 100ms gaps)..."
     local rapid_start=$(now_ms)
     for j in $(seq 1 5); do
-        echo "Rapid change $j - $(date +%s%N)" >> "$temp_file"
+        echo "Rapid change $j - $(date +%s%N)" >> "$AUTOSAVE_TEMP_FILE"
         python3 -c "import time; time.sleep(0.1)"
     done
     local rapid_mod_end=$(now_ms)
@@ -610,7 +687,7 @@ benchmark_autosave() {
 
     # Check file mtime
     local final_mtime
-    final_mtime=$(stat -f "%m" "$temp_file" 2>/dev/null || stat -c "%Y" "$temp_file" 2>/dev/null)
+    final_mtime=$(stat -f "%m" "$AUTOSAVE_TEMP_FILE" 2>/dev/null || stat -c "%Y" "$AUTOSAVE_TEMP_FILE" 2>/dev/null)
     echo "    Final mtime: $final_mtime"
     echo "    File watcher should have coalesced rapid changes via debounce"
     AUTOSAVE_RAPID="${rapid_mod_time}"
@@ -624,7 +701,7 @@ benchmark_autosave() {
         AUTOSAVE_SURVIVED="NO"
     fi
 
-    rm -f "$temp_file"
+    rm -f "$AUTOSAVE_TEMP_FILE"
     kill_kern
 }
 
@@ -649,12 +726,12 @@ benchmark_rapid_tab_switch() {
         tab_files+=("$f")
     done
 
-    open -a "$KERN_APP_PATH" "${tab_files[0]}"
+    launch_kern "${tab_files[0]}"
     wait_for_window 15000 > /dev/null
     sleep 2
 
     for i in $(seq 1 14); do
-        open -a "$KERN_APP_PATH" "${tab_files[$i]}"
+        launch_kern "${tab_files[$i]}"
         sleep 0.3
     done
     sleep 3
@@ -669,7 +746,7 @@ benchmark_rapid_tab_switch() {
     # Use Cmd+Shift+] for forward tab navigation (standard macOS)
     osascript << 'APPLESCRIPT_EOF' 2>/dev/null || true
 tell application "System Events"
-    tell process "KernTextKit"
+    tell process "Kern"
         repeat 50 times
             -- Cmd+Shift+] to switch to next tab
             key code 30 using {command down, shift down}
@@ -741,7 +818,7 @@ generate_results() {
 
 ## 1. Cold Start Benchmark
 
-Time from \`open -a KernTextKit\` until the first window appears. Average of $RUNS runs.
+Time from \`open -a Kern\` until the first window appears. Average of $RUNS runs.
 
 | Scenario | Avg Time | Notes |
 |----------|----------|-------|
@@ -751,7 +828,7 @@ Time from \`open -a KernTextKit\` until the first window appears. Average of $RU
 
 ## 2. Multi-Tab Open Benchmark
 
-Fresh KernTextKit launch, then opening N files sequentially with \`open -a KernTextKit <file>\`.
+Fresh Kern launch, then opening N files sequentially with \`open -a Kern <file>\`.
 
 | Tabs Opened | Total Time | Memory | Windows Reported |
 |-------------|------------|--------|------------------|
@@ -838,6 +915,7 @@ main() {
     echo "  Runs per measurement: $RUNS"
     echo "================================================================="
 
+    ensure_kern_idle_or_die
     generate_test_fixtures
 
     # Initialize all result variables with defaults

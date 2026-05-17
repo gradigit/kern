@@ -1,21 +1,30 @@
 #!/bin/bash
-# KernTextKit vs MarkText Benchmark Script
+# Kern vs MarkText Benchmark Script
 # Compares cold start, memory, tab switching, file open latency, and large file handling.
 # Usage: ./scripts/benchmark.sh
 #
-# If MarkText is not installed, runs KernTextKit-only benchmarks.
+# If MarkText is not installed, runs Kern-only benchmarks.
 # To include MarkText, pass its .app path:
 #   MARKTEXT_PATH="/path/to/MarkText.app" ./scripts/benchmark.sh
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BENCHMARK_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kern-benchmark.XXXXXX")"
 
-KERN_APP="KernTextKit"
+cleanup_benchmark_tmp_dir() {
+    if [ -d "$BENCHMARK_TMP_DIR" ]; then
+        find "$BENCHMARK_TMP_DIR" -depth -mindepth 1 -delete
+        rmdir "$BENCHMARK_TMP_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup_benchmark_tmp_dir EXIT
+
+KERN_APP="Kern"
 MARKTEXT_APP="MarkText"
 STRESS_FILE="$REPO_ROOT/test-fixtures/stress-test.md"
-LARGE_FILE="/tmp/kerntextkit-benchmark-large.md"
-RESULTS_FILE="/tmp/kerntextkit-benchmark-results.md"
+LARGE_FILE="$BENCHMARK_TMP_DIR/kern-benchmark-large.md"
+RESULTS_FILE="$BENCHMARK_TMP_DIR/kern-benchmark-results.md"
 RUNS=3  # Number of iterations for averaged measurements
 
 # High-res timestamp in seconds
@@ -51,6 +60,67 @@ app_available() {
     local app_name="$1"
     open -Ra "$app_name" 2>/dev/null && return 0
     return 1
+}
+
+app_process_name() {
+    basename "$1" .app
+}
+
+pid_file_for_app() {
+    local process_name
+    process_name=$(app_process_name "$1")
+    printf '%s/owned-%s.pids\n' "$BENCHMARK_TMP_DIR" "$process_name"
+}
+
+current_app_pids() {
+    local process_name
+    process_name=$(app_process_name "$1")
+    pgrep -x "$process_name" 2>/dev/null || true
+}
+
+ensure_app_idle_or_die() {
+    local app_name="$1"
+    local running
+    running=$(current_app_pids "$app_name")
+    if [ -n "$running" ]; then
+        echo "ERROR: $app_name is already running; refusing broad benchmark cleanup." >&2
+        exit 1
+    fi
+}
+
+remember_owned_app_pids() {
+    local app_name="$1"
+    local before_pids="${2:-}"
+    local pid_file tmp_file current_pids
+    pid_file=$(pid_file_for_app "$app_name")
+    tmp_file="$pid_file.tmp"
+    : > "$tmp_file"
+    current_pids=$(current_app_pids "$app_name")
+    for pid in $current_pids; do
+        if ! printf '%s\n' "$before_pids" | grep -qx "$pid"; then
+            printf '%s\n' "$pid" >> "$tmp_file"
+        fi
+    done
+    if [ ! -s "$tmp_file" ] && [ -z "$before_pids" ] && [ -n "$current_pids" ]; then
+        printf '%s\n' "$current_pids" | head -n1 > "$tmp_file"
+    fi
+    if [ -f "$pid_file" ]; then
+        cat "$pid_file" "$tmp_file" | awk 'NF' | sort -u > "$pid_file.merged"
+        mv "$pid_file.merged" "$pid_file"
+        rm -f "$tmp_file"
+    else
+        mv "$tmp_file" "$pid_file"
+    fi
+}
+
+launch_app() {
+    local app_name="$1"
+    shift
+    local before_pids
+    before_pids=$(current_app_pids "$app_name")
+    open -a "$app_name" "$@"
+    sleep 0.1
+    remember_owned_app_pids "$app_name" "$before_pids"
 }
 
 HAS_MARKTEXT=false
@@ -105,7 +175,7 @@ get_rss_mb() {
     local process_name
     process_name=$(basename "$app_name" .app)
     local pids
-    pids=$(pgrep -f "$process_name" 2>/dev/null || true)
+    pids=$(pgrep -x "$process_name" 2>/dev/null || true)
     if [ -z "$pids" ]; then
         echo "0"
         return
@@ -144,12 +214,24 @@ wait_for_window() {
 # Kill app gracefully
 kill_app() {
     local app_name="$1"
-    local process_name
-    process_name=$(basename "$app_name" .app)
-    osascript -e "tell application \"$process_name\" to quit" 2>/dev/null || true
+    local pid_file owned_pids current_pids
+    pid_file=$(pid_file_for_app "$app_name")
+    [ -f "$pid_file" ] || return 0
+    owned_pids=$(cat "$pid_file" 2>/dev/null || true)
+    current_pids=$(current_app_pids "$app_name")
+    for pid in $current_pids; do
+        if printf '%s\n' "$owned_pids" | grep -qx "$pid"; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
     sleep 1
-    pkill -f "$process_name" 2>/dev/null || true
-    sleep 0.5
+    current_pids=$(current_app_pids "$app_name")
+    for pid in $current_pids; do
+        if printf '%s\n' "$owned_pids" | grep -qx "$pid"; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -f "$pid_file"
 }
 
 # ─── Benchmark: cold start ───────────────────────────────────────
@@ -160,7 +242,7 @@ benchmark_cold_start() {
     kill_app "$app_name"
     sleep 1
 
-    open -a "$app_name" "$file"
+    launch_app "$app_name" "$file"
     local latency
     latency=$(wait_for_window "$app_name" 15)
 
@@ -179,14 +261,15 @@ benchmark_memory() {
     # Create temp files
     local files=()
     for i in $(seq 1 "$n"); do
-        local f="/tmp/kern-bench-${i}.md"
+        local f
+        f=$(mktemp "$BENCHMARK_TMP_DIR/kern-bench-${i}.XXXXXX.md")
         cp "$STRESS_FILE" "$f"
         files+=("$f")
     done
 
     # Open all files
     for f in "${files[@]}"; do
-        open -a "$app_name" "$f"
+        launch_app "$app_name" "$f"
         sleep 0.5
     done
     sleep 3  # let everything settle
@@ -218,7 +301,8 @@ benchmark_tab_switch() {
     # Create and open N distinct files (different names so titles differ)
     local files=()
     for i in $(seq 1 "$n"); do
-        local f="/tmp/kern-tabswitch-${i}.md"
+        local f
+        f=$(mktemp "$BENCHMARK_TMP_DIR/kern-tabswitch-${i}.XXXXXX.md")
         echo "# Tab $i content" > "$f"
         echo "" >> "$f"
         echo "This is file $i for tab switch benchmark." >> "$f"
@@ -226,7 +310,7 @@ benchmark_tab_switch() {
     done
 
     for f in "${files[@]}"; do
-        open -a "$app_name" "$f"
+        launch_app "$app_name" "$f"
         sleep 0.5
     done
     sleep 3  # let all tabs load
@@ -307,7 +391,7 @@ benchmark_rapid_cycle() {
     done
 
     for f in "${files[@]}"; do
-        open -a "$app_name" "$f"
+        launch_app "$app_name" "$f"
         sleep 0.3
     done
     sleep 3
@@ -358,12 +442,12 @@ benchmark_open_in_running() {
     echo "# File one" > "$f1"
     echo "# File two — opened into running app" > "$f2"
 
-    open -a "$app_name" "$f1"
+    launch_app "$app_name" "$f1"
     sleep 2
 
     local start
     start=$(now)
-    open -a "$app_name" "$f2"
+    launch_app "$app_name" "$f2"
 
     # Wait for title to change to file 2
     local got_it=false
@@ -414,8 +498,9 @@ run_bench() {
     fi
 
     # Store in global vars for the results table
-    eval "${3:-_DISCARD}_KERN=\"${kern_result}\""
-    eval "${3:-_DISCARD}_MARKTEXT=\"${marktext_result}\""
+    local result_prefix="${3:-_DISCARD}"
+    printf -v "${result_prefix}_KERN" '%s' "$kern_result"
+    printf -v "${result_prefix}_MARKTEXT" '%s' "$marktext_result"
 }
 
 # ═════════════════════════════════════════════════════════════════
@@ -433,6 +518,11 @@ if [ "$HAS_MARKTEXT" = false ]; then
     echo "      To include MarkText, install it or set:"
     echo "      MARKTEXT_PATH=/path/to/MarkText.app ./scripts/benchmark.sh"
     echo ""
+fi
+
+ensure_app_idle_or_die "$KERN_APP"
+if [ "$HAS_MARKTEXT" = true ]; then
+    ensure_app_idle_or_die "$MARKTEXT_APP"
 fi
 
 generate_large_file
@@ -551,8 +641,8 @@ run_memory_bench() {
     else
         local marktext_mem="$NA"
     fi
-    eval "KERN_MEM_${n}=\"${kern_mem}\""
-    eval "MARKTEXT_MEM_${n}=\"${marktext_mem}\""
+    printf -v "KERN_MEM_${n}" '%s' "$kern_mem"
+    printf -v "MARKTEXT_MEM_${n}" '%s' "$marktext_mem"
 }
 
 run_memory_bench 1 "1 tab"

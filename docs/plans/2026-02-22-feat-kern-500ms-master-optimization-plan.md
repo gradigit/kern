@@ -128,7 +128,7 @@ Open path still does broad parse/layout work before first-editable. Major opport
 | Hypothesis | Confidence | Support | Contradiction |
 |---|---|---|---|
 | H1: Harness artifacts still distort Kern-vs-Zed comparisons | High | Known cap/bias/asymmetry in current code paths | Existing classification protections reduce but do not remove distortion |
-| H2: Kern can reach ~500ms without deep architecture rewrite | Medium-High | Existing path already has thresholding + instrumentation hooks | Large markdown feature surface may still require deeper incremental model |
+| H2: Kern can reach ~500ms without deep architecture replacement | Medium-High | Existing path already has thresholding + instrumentation hooks | Large markdown feature surface may still require deeper incremental model |
 | H3: Zed fork hook is required for strong parity | High | `--wait` semantics are not open-ready semantics | External probing can approximate but lower confidence |
 | H4: Piece-table/rope is near-term mandatory | Medium-Low | Long-term scalability benefit | Near-term wins likely from pipeline/harness fixes first |
 

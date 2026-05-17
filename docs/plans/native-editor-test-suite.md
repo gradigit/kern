@@ -200,35 +200,18 @@ Use SnapshotTesting (AppKit view snapshots) because it’s fast and doesn’t re
 - Exhaustive snapshot matrix:
   - Adds preference combinations for rendering-affecting settings
 
-### 3) UI E2E (Interaction, Not Rendering)
+### 3) Interaction Coverage (Unit-Driven AppKit Harnesses)
 
-Keep UI tests focused on what only UI can validate:
+The old XCUI runner has been removed. Interaction coverage now lives in unit-driven AppKit tests and targeted program/stateful suites:
 
-- click hit-targets
+- click/toggle and marker-hit-target behaviors
 - selection/caret movement
-- find/replace
-- copy button interaction + pasteboard
-- save menu + disk rewrite behavior
-- one exhaustive full-fixture live typing loop (chunked typing + generated UI action permutations + save assertions)
-  - default mode is character-by-character typing (`KERN_UI_TYPING_MODE=character`)
-  - optional `chunked` mode exists for faster debugging
+- find/replace obstruction rules
+- copy button behavior + pasteboard assertions
+- save/export transformation behavior
+- long-sequence typing/action programs in the PR + nightly typing-behavior gates
 
-Avoid “render verification” here; use snapshots instead.
-
-Prereq (macOS): UI tests require Accessibility trust for `KernTextKitUITests-Runner`.
-If tests are skipped for missing permissions, run:
-
-- `./scripts/open-ui-test-permissions.sh`
-
-If macOS refuses to show/add the runner in the Accessibility list (common TCC/UI corruption):
-
-- Try drag-and-drop of the Runner.app from Finder into the list (the `+` picker can fail silently on some OS versions).
-- Reset just Accessibility permissions, then reboot:
-  - `tccutil reset Accessibility`
-- If the Accessibility list is blank and adding fails silently, delete this file and reboot:
-  - `rm ~/Library/Preferences/com.apple.security.KCN.plist`
-- If `tccd` is disabled, re-enable it:
-  - `launchctl load -wF /System/Library/LaunchAgents/com.apple.tccd.plist`
+Avoid render verification here; use snapshots and layout-metric tests instead.
 
 ### 4) Bench/Perf Harness
 
@@ -245,7 +228,6 @@ If macOS refuses to show/add the runner in the Accessibility list (common TCC/UI
 
 ## Artifacts / Logging Requirements
 
-- UI tests must always emit screenshots (already default).
 - Snapshot failures must preserve:
   - reference image
   - failure image
@@ -254,10 +236,10 @@ If macOS refuses to show/add the runner in the Accessibility list (common TCC/UI
   - exported markdown
   - a minimal diff summary
   - a dump of key attributes for the failing region
-- Exhaustive UI full-fixture typing must attach:
+- Exhaustive typing/program lanes must attach:
   - config report (fixture, mode, chunk size, action depth/limit)
   - action-program count report
-  - periodic screenshots during typing/action passes
+  - periodic diagnostic artifacts during long typing/action passes
 
 ## Done When
 
@@ -285,5 +267,3 @@ We can say the suite is “good enough to drive development” when:
   - `KERN_RUN_ULTRA=1 ./scripts/run-exhaustive-native-suite.sh`
 - Include full mega all-profile matrix (very slow):
   - `KERN_RUN_ULTRA_FULL=1 ./scripts/run-exhaustive-native-suite.sh`
-- Include exhaustive UI automation:
-  - `KERN_RUN_UI_EXHAUSTIVE=1 ./scripts/run-exhaustive-native-suite.sh`

@@ -1,5 +1,5 @@
 #!/bin/bash
-# measure-cold-start.sh — KernTextKit cold start timing (Release build)
+# measure-cold-start.sh — Kern cold start timing (Release build)
 #
 # Measures time from process start to `applicationDidFinishLaunching end`.
 #
@@ -14,8 +14,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="KernTextKit"
-PROCESS_NAME="KernTextKit"
+APP_NAME="Kern"
+PROCESS_NAME="Kern"
 ITERATIONS=${1:-5}
 WAIT_SECONDS=${2:-4}
 
@@ -23,7 +23,7 @@ TEST_FILE="${TEST_FILE:-$(pwd)/test-fixtures/stress-test.md}"
 
 APP_PATH="${APP_PATH:-}"
 if [ -z "$APP_PATH" ]; then
-  APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData/${APP_NAME}-*/Build/Products/Release/${APP_NAME}.app" -maxdepth 0 2>/dev/null | head -1 || true)"
+  APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData/KernTextKit-"*/Build/Products/Release \( -name 'Kern.app' -o -name 'KernTextKit.app' \) -maxdepth 0 2>/dev/null | head -1 || true)"
 fi
 
 if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then

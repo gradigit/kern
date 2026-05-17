@@ -118,6 +118,26 @@ final class NativeMarkdownSpecConformanceTests: XCTestCase {
     }
 
     @MainActor
+    func testCommonMarkStrictRegressionCanaries() throws {
+        try TestGates.skipUnlessSpecConformance()
+        try assertExamplesPass(
+            mode: "commonmark",
+            fixtureName: "commonmark-0.31.2.json",
+            examples: [81, 95, 115, 161, 213, 228, 290, 367]
+        )
+    }
+
+    @MainActor
+    func testGfmStrictRegressionCanaries() throws {
+        try TestGates.skipUnlessSpecConformance()
+        try assertExamplesPass(
+            mode: "gfm",
+            fixtureName: "gfm-0.29.0.gfm.13.json",
+            examples: [51, 65, 85, 131, 182, 202, 206, 268, 376]
+        )
+    }
+
+    @MainActor
     private func runConformance(mode: String, fixtureName: String) throws {
         let fixture = try loadFixture(named: fixtureName)
         XCTAssertEqual(
@@ -271,6 +291,53 @@ final class NativeMarkdownSpecConformanceTests: XCTestCase {
             Check attachments: spec-conformance-\(mode)-summary / spec-conformance-\(mode)-failures.
             """
         )
+    }
+
+    @MainActor
+    private func assertExamplesPass(mode: String, fixtureName: String, examples exampleIDs: [Int]) throws {
+        let fixture = try loadFixture(named: fixtureName)
+        let wanted = Set(exampleIDs)
+        let filtered = fixture.examples.filter { wanted.contains($0.example) }
+        XCTAssertEqual(filtered.count, wanted.count, "Missing requested spec examples in \(fixtureName)")
+
+        let options = strictOptions(for: mode)
+        let requestItems = filtered.map { example in
+            let imported = NativeMarkdownCodec.importMarkdown(example.markdown, options: options, baseURL: nil)
+            let exported = NativeMarkdownCodec.exportMarkdown(imported, options: options)
+            return OracleRequestItem(id: example.example, inputMarkdown: example.markdown, outputMarkdown: exported)
+        }
+        let results = try runOracle(mode: mode, items: requestItems)
+        let byID = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
+
+        var failures: [String] = []
+        for example in filtered {
+            guard let result = byID[example.example] else {
+                failures.append("missing oracle result for example \(example.example)")
+                continue
+            }
+            if !result.semanticMatch {
+                let imported = NativeMarkdownCodec.importMarkdown(example.markdown, options: options, baseURL: nil)
+                let exported = NativeMarkdownCodec.exportMarkdown(imported, options: options)
+                failures.append(
+                    """
+                    example=\(example.example) section=\(example.section)
+                    --- markdown ---
+                    \(example.markdown)
+                    --- exported ---
+                    \(exported)
+                    --- oracle_input_html ---
+                    \(result.inputHTML)
+                    --- oracle_output_html ---
+                    \(result.outputHTML)
+                    """
+                )
+            }
+        }
+
+        if !failures.isEmpty {
+            attachText(failures.joined(separator: "\n\n"), named: "spec-canaries-\(mode)-failures")
+        }
+        XCTAssertTrue(failures.isEmpty, "Strict \(mode) regression canaries failed: \(failures.joined(separator: "\n\n"))")
     }
 
     @MainActor

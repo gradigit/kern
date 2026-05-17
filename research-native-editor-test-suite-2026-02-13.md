@@ -1,5 +1,8 @@
 # Research: Native WYSIWYG Markdown Editor Test Suite (macOS, No WebView)
 
+> Historical research note retained for reference. It is not part of the active contributor quick-start path.
+
+
 **Date:** 2026-02-13  
 **Depth:** Full  
 **Query:** Design a comprehensive, exhaustive, full-featured test suite for a macOS-native WYSIWYG Markdown editor (TextKit), aligned with Notion/GitHub behaviors and GFM/CommonMark rules. Include screenshot-based visual confirmation, strong logs, and an agentic “run tests -> fix -> rerun -> review -> commit” loop.

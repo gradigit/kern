@@ -8,15 +8,60 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
         let edge: TypingBehaviorEdge
         let seedMarkdown: String
         let defaults: [String: Any]
+        let explicitMarkerState: TypingBehaviorMarkerState?
+        let explicitIndentBucket: TypingBehaviorIndentBucket?
+        let explicitContentState: TypingBehaviorContentState?
+        let explicitPolicyProfile: TypingBehaviorPolicyProfile?
+        let explicitShortcutVariant: TypingBehaviorShortcutVariant?
         let prepare: @MainActor (_ vc: NativeEditorViewController, _ textView: NativeMarkdownTextView) -> Void
         let perform: @MainActor (_ vc: NativeEditorViewController, _ textView: NativeMarkdownTextView) -> Void
         let assertExport: (_ exported: String) -> Void
+
+        init(
+            id: String,
+            edge: TypingBehaviorEdge,
+            seedMarkdown: String,
+            defaults: [String: Any],
+            markerState: TypingBehaviorMarkerState? = nil,
+            indentBucket: TypingBehaviorIndentBucket? = nil,
+            contentState: TypingBehaviorContentState? = nil,
+            policyProfile: TypingBehaviorPolicyProfile? = nil,
+            shortcutVariant: TypingBehaviorShortcutVariant? = nil,
+            prepare: @escaping @MainActor (_ vc: NativeEditorViewController, _ textView: NativeMarkdownTextView) -> Void,
+            perform: @escaping @MainActor (_ vc: NativeEditorViewController, _ textView: NativeMarkdownTextView) -> Void,
+            assertExport: @escaping (_ exported: String) -> Void
+        ) {
+            self.id = id
+            self.edge = edge
+            self.seedMarkdown = seedMarkdown
+            self.defaults = defaults
+            self.explicitMarkerState = markerState
+            self.explicitIndentBucket = indentBucket
+            self.explicitContentState = contentState
+            self.explicitPolicyProfile = policyProfile
+            self.explicitShortcutVariant = shortcutVariant
+            self.prepare = prepare
+            self.perform = perform
+            self.assertExport = assertExport
+        }
+
+        var factors: TypingBehaviorFactors {
+            TypingBehaviorFactors(
+                context: edge.context,
+                action: edge.action,
+                markerState: explicitMarkerState ?? .default(for: edge.context),
+                indentBucket: explicitIndentBucket ?? .default(for: edge.context),
+                contentState: explicitContentState ?? .nonEmpty,
+                policyProfile: explicitPolicyProfile ?? .default(for: edge.context),
+                shortcutVariant: explicitShortcutVariant ?? .default(for: edge.action)
+            )
+        }
     }
 
     @MainActor
     func testCriticalTypingBehaviorTransitionMatrix_PRLane() throws {
         let cases = prLaneCases()
-        var coverage = TypingBehaviorCoverage(required: Set(cases.map(\.edge)))
+        var coverage = TypingBehaviorCoverage(contract: .current())
 
         for c in cases {
             withTemporaryDefaults(c.defaults) {
@@ -31,17 +76,30 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
 
                 let exported = NativeMarkdownCodec.exportMarkdown(textView.attributedString(), options: .fromUserDefaults())
                 c.assertExport(exported)
-                coverage.record(edge: c.edge, caseID: c.id)
+                coverage.record(factors: c.factors, caseID: c.id)
             }
         }
 
-        attachReport(coverage.renderReport(), name: "typing-behavior-matrix-prlane-coverage")
-        let missing = coverage.missingRequired
-        let missingSummary = missing.map { "\($0.context.rawValue):\($0.action.rawValue)" }.joined(separator: ", ")
+        let coverageReport = coverage.renderReport()
+        attachReport(coverageReport, name: "typing-behavior-matrix-coverage")
+        print(coverageReport)
+        let missingFactors = coverage.missingRequiredFactors
         XCTAssertTrue(
-            missing.isEmpty,
-            "Missing required edges: \(missingSummary)"
+            missingFactors.isEmpty,
+            "Missing required factor cases: \(missingFactors.map(\.label).joined(separator: ", "))"
         )
+        XCTAssertGreaterThanOrEqual(
+            coverage.pairwiseCoverageRatio,
+            coverage.contract.lane.pairwiseThreshold,
+            "Pairwise coverage below threshold for lane=\(coverage.contract.lane.rawValue): \(coverage.pairwiseCoverageRatio)"
+        )
+        if let tripleThreshold = coverage.contract.lane.criticalTripleThreshold {
+            XCTAssertGreaterThanOrEqual(
+                coverage.criticalTripleCoverageRatio,
+                tripleThreshold,
+                "Critical triple coverage below threshold for lane=\(coverage.contract.lane.rawValue): \(coverage.criticalTripleCoverageRatio)"
+            )
+        }
     }
 
     // MARK: - Matrix Cases
@@ -56,6 +114,8 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
                 seedMarkdown: "",
                 defaults: [:],
+                contentState: .empty,
+                shortcutVariant: .bullet,
                 prepare: { _, _ in },
                 perform: { _, textView in
                     textView.insertText("- ", replacementRange: textView.selectedRange())
@@ -72,6 +132,8 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
                 seedMarkdown: "",
                 defaults: [:],
+                contentState: .empty,
+                shortcutVariant: .ordered,
                 prepare: { _, _ in },
                 perform: { _, textView in
                     textView.insertText("1. ", replacementRange: textView.selectedRange())
@@ -88,6 +150,8 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
                 seedMarkdown: "",
                 defaults: [:],
+                contentState: .empty,
+                shortcutVariant: .bullet,
                 prepare: { _, _ in },
                 perform: { _, textView in
                     textView.insertText("* ", replacementRange: textView.selectedRange())
@@ -104,12 +168,56 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
                 seedMarkdown: "",
                 defaults: [:],
+                contentState: .empty,
+                shortcutVariant: .bullet,
                 prepare: { _, _ in },
                 perform: { _, textView in
                     textView.insertText("+ ", replacementRange: textView.selectedRange())
                 },
                 assertExport: { exported in
                     XCTAssertTrue(exported.contains("+ ") || exported.contains("- "), "Expected plus marker shortcut export. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "paragraph-marker-task",
+                edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
+                seedMarkdown: "",
+                defaults: [
+                    "nativeEditor.taskRendering": "gfm",
+                ],
+                contentState: .empty,
+                shortcutVariant: .task,
+                prepare: { _, _ in },
+                perform: { _, textView in
+                    textView.insertText("- [ ] ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("- [ ] ") || exported.contains("- ☐ "),
+                        "Expected task marker shortcut export. got=\(exported)"
+                    )
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "paragraph-marker-quote",
+                edge: TypingBehaviorEdge(context: .paragraph, action: .markerShortcut),
+                seedMarkdown: "",
+                defaults: [:],
+                contentState: .empty,
+                shortcutVariant: .quote,
+                prepare: { _, _ in },
+                perform: { _, textView in
+                    textView.insertText("> ", replacementRange: textView.selectedRange())
+                    textView.insertText("quoted", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("> quoted"), "Expected blockquote shortcut export. got=\(exported)")
                 }
             )
         )
@@ -208,6 +316,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .ordered, action: .markerShortcut),
                 seedMarkdown: "1. alpha\n",
                 defaults: [:],
+                shortcutVariant: .bullet,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("alpha", in: textView)
                 },
@@ -245,6 +354,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .bullet, action: .shiftTabOutdent),
                 seedMarkdown: "  - alpha\n",
                 defaults: [:],
+                indentBucket: .nested,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("alpha", in: textView)
                 },
@@ -281,6 +391,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .ordered, action: .shiftTabOutdent),
                 seedMarkdown: "   1. alpha\n",
                 defaults: [:],
+                indentBucket: .nested,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("alpha", in: textView)
                 },
@@ -317,6 +428,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .task, action: .shiftTabOutdent),
                 seedMarkdown: "  - [ ] alpha\n",
                 defaults: [:],
+                indentBucket: .nested,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("alpha", in: textView)
                 },
@@ -348,6 +460,27 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                     XCTAssertTrue(
                         exported.contains("2. next") || exported.contains("1. next"),
                         "Expected nested ordered continuation marker. got=\(exported)"
+                    )
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "nested-ordered-shift-tab-outdent",
+                edge: TypingBehaviorEdge(context: .nestedOrdered, action: .shiftTabOutdent),
+                seedMarkdown: "1. parent\n   1. child\n",
+                defaults: [:],
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("child", in: textView)
+                },
+                perform: { vc, textView in
+                    XCTAssertTrue(vc.textView(textView, doCommandBy: #selector(NSResponder.insertBacktab(_:))))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("1. child") || exported.contains("2. child"),
+                        "Expected nested ordered Shift+Tab to keep ordered marker while outdenting. got=\(exported)"
                     )
                 }
             )
@@ -422,6 +555,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 edge: TypingBehaviorEdge(context: .nestedOrdered, action: .markerShortcut),
                 seedMarkdown: "1. parent\n   1. child\n",
                 defaults: [:],
+                shortcutVariant: .task,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("child", in: textView)
                 },
@@ -446,6 +580,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                     "nativeEditor.orderedTasksEnabled": true,
                     "nativeEditor.taskRendering": "gfm",
                 ],
+                shortcutVariant: .ordered,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("child", in: textView)
                 },
@@ -564,6 +699,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                     "nativeEditor.orderedTasksEnabled": true,
                     "nativeEditor.taskRendering": "gfm",
                 ],
+                indentBucket: .nested,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringStart("alpha", in: textView)
                 },
@@ -915,10 +1051,55 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
 
         out.append(
             TransitionCase(
+                id: "codefence-bullet-shortcut-no-convert",
+                edge: TypingBehaviorEdge(context: .codeFence, action: .markerShortcut),
+                seedMarkdown: "```\ncode\n```",
+                defaults: [:],
+                shortcutVariant: .bullet,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringEnd("code", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertNewline(nil)
+                    textView.insertText("- raw-bullet", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("```"))
+                    XCTAssertTrue(exported.contains("- raw-bullet"), "Expected bullet shortcut text to remain literal inside code fence. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("- raw-bullet"), "Code fence bullet shortcut must not escape into a real list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "codefence-ordered-shortcut-no-convert",
+                edge: TypingBehaviorEdge(context: .codeFence, action: .markerShortcut),
+                seedMarkdown: "```\ncode\n```",
+                defaults: [:],
+                shortcutVariant: .ordered,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringEnd("code", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertNewline(nil)
+                    textView.insertText("1. raw-ordered", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("```"))
+                    XCTAssertTrue(exported.contains("1. raw-ordered"), "Expected ordered shortcut text to remain literal inside code fence. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("1. raw-ordered"), "Code fence ordered shortcut must not escape into a real list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
                 id: "codefence-marker-shortcut-no-convert",
                 edge: TypingBehaviorEdge(context: .codeFence, action: .markerShortcut),
                 seedMarkdown: "```\ncode\n```",
                 defaults: [:],
+                shortcutVariant: .task,
                 prepare: { _, textView in
                     Self.moveCaretToSubstringEnd("code", in: textView)
                 },
@@ -929,6 +1110,499 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
                 assertExport: { exported in
                     XCTAssertTrue(exported.contains("```"))
                     XCTAssertTrue(exported.contains("- [ ] raw"), "Expected raw markdown to remain literal inside code fence. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "codefence-quote-shortcut-no-convert",
+                edge: TypingBehaviorEdge(context: .codeFence, action: .markerShortcut),
+                seedMarkdown: "```\ncode\n```",
+                defaults: [:],
+                shortcutVariant: .quote,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringEnd("code", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertNewline(nil)
+                    textView.insertText("> raw-quote", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("```"))
+                    XCTAssertTrue(exported.contains("> raw-quote"), "Expected quote shortcut text to remain literal inside code fence. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("> raw-quote"), "Code fence quote shortcut must not escape into a real blockquote. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "table-cell-marker-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .tableCell, action: .markerShortcut),
+                seedMarkdown: """
+                | Name | Value |
+                | --- | --- |
+                | Alpha | Beta |
+                """,
+                defaults: [:],
+                shortcutVariant: .bullet,
+                prepare: { _, textView in
+                    Self.moveCaretToTableCellContentStart(row: 1, col: 0, in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("- ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("| --- | --- |"), "Expected table structure to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("- Alpha"), "Expected table cell content to keep literal marker text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("- Alpha"), "Table cell shortcut must not convert the row into a bullet block. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "table-cell-ordered-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .tableCell, action: .markerShortcut),
+                seedMarkdown: """
+                | Name | Value |
+                | --- | --- |
+                | Alpha | Beta |
+                """,
+                defaults: [:],
+                shortcutVariant: .ordered,
+                prepare: { _, textView in
+                    Self.moveCaretToTableCellContentStart(row: 1, col: 0, in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("1. ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("| --- | --- |"), "Expected table structure to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("1. Alpha"), "Expected ordered shortcut text to stay inside the table cell. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("1. Alpha"), "Table cell ordered shortcut must not convert the row into an ordered list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "table-cell-task-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .tableCell, action: .markerShortcut),
+                seedMarkdown: """
+                | Name | Value |
+                | --- | --- |
+                | Alpha | Beta |
+                """,
+                defaults: [:],
+                shortcutVariant: .task,
+                prepare: { _, textView in
+                    Self.moveCaretToTableCellContentStart(row: 1, col: 0, in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("- [ ] ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("| --- | --- |"), "Expected table structure to remain intact. got=\(exported)")
+                    XCTAssertTrue(
+                        exported.contains("- [ ] Alpha") || exported.contains("- ☐ Alpha"),
+                        "Expected table cell to keep literal task shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("- [ ]"), "Table cell shortcut must not convert the row into a task list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "table-cell-quote-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .tableCell, action: .markerShortcut),
+                seedMarkdown: """
+                | Name | Value |
+                | --- | --- |
+                | Alpha | Beta |
+                """,
+                defaults: [:],
+                shortcutVariant: .quote,
+                prepare: { _, textView in
+                    Self.moveCaretToTableCellContentStart(row: 1, col: 0, in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("> quoted ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("| --- | --- |"), "Expected table structure to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("> quoted Alpha"), "Expected quote shortcut text to stay inside the table cell. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("> quoted"), "Table cell quote shortcut must not convert the row into a blockquote. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "inline-code-ordered-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .inlineCode, action: .markerShortcut),
+                seedMarkdown: "`codeValue`\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                shortcutVariant: .ordered,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("codeValue", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    let ns = textView.string as NSString
+                    let tokenRange = ns.range(of: "codeValue")
+                    XCTAssertNotEqual(tokenRange.location, NSNotFound, "Expected expanded inline-code token")
+                    guard tokenRange.location != NSNotFound else { return }
+                    textView.insertText("", replacementRange: tokenRange)
+                    textView.insertText("1. raw", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("`1. raw`"), "Expected inline code to preserve literal ordered shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("1. raw"), "Inline code ordered shortcut must not convert the paragraph into a list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "inline-code-marker-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .inlineCode, action: .markerShortcut),
+                seedMarkdown: "`codeValue`\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                shortcutVariant: .bullet,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("codeValue", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    let ns = textView.string as NSString
+                    let tokenRange = ns.range(of: "codeValue")
+                    XCTAssertNotEqual(tokenRange.location, NSNotFound, "Expected expanded inline-code token")
+                    guard tokenRange.location != NSNotFound else { return }
+                    textView.insertText("", replacementRange: tokenRange)
+                    textView.insertText("- raw", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("`- raw`"), "Expected inline code to preserve literal marker text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("- raw"), "Inline code shortcut must not convert the paragraph into a list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "inline-code-task-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .inlineCode, action: .markerShortcut),
+                seedMarkdown: "`codeValue`\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                shortcutVariant: .task,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("codeValue", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    let ns = textView.string as NSString
+                    let tokenRange = ns.range(of: "codeValue")
+                    XCTAssertNotEqual(tokenRange.location, NSNotFound, "Expected expanded inline-code token")
+                    guard tokenRange.location != NSNotFound else { return }
+                    textView.insertText("", replacementRange: tokenRange)
+                    textView.insertText("- [ ] raw", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("`- [ ] raw`"), "Expected inline code to preserve literal task shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("- [ ] raw"), "Inline code task shortcut must not convert the paragraph into a task list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "inline-code-quote-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .inlineCode, action: .markerShortcut),
+                seedMarkdown: "`codeValue`\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                shortcutVariant: .quote,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("codeValue", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    let ns = textView.string as NSString
+                    let tokenRange = ns.range(of: "codeValue")
+                    XCTAssertNotEqual(tokenRange.location, NSNotFound, "Expected expanded inline-code token")
+                    guard tokenRange.location != NSNotFound else { return }
+                    textView.insertText("", replacementRange: tokenRange)
+                    textView.insertText("> raw", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("`> raw`"), "Expected inline code to preserve literal quote shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("> raw"), "Inline code quote shortcut must not convert the paragraph into a blockquote. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "hybrid-link-destination-ordered-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .linkLiteral, action: .markerShortcut),
+                seedMarkdown: "[docs](dest-token)\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                policyProfile: .hybridSyntax,
+                shortcutVariant: .ordered,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("docs", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    textView.insertText("1. ", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("[docs](1. dest-token)") || exported.contains("[docs](1. dest-token"),
+                        "Expected hybrid link destination to keep literal ordered shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("1. "), "Hybrid link destination must not convert into an ordered list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "hybrid-link-destination-marker-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .linkLiteral, action: .markerShortcut),
+                seedMarkdown: "[docs](dest-token)\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                policyProfile: .hybridSyntax,
+                shortcutVariant: .bullet,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("docs", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    textView.insertText("- ", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("[docs](- dest-token)") || exported.contains("[docs](- dest-token"),
+                        "Expected hybrid link destination to keep literal shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("- "), "Hybrid link destination must not convert into a list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "hybrid-link-destination-task-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .linkLiteral, action: .markerShortcut),
+                seedMarkdown: "[docs](dest-token)\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                policyProfile: .hybridSyntax,
+                shortcutVariant: .task,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("docs", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    textView.insertText("- [ ] ", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("[docs]("), "Expected inline link export to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("- [ ] dest-token"), "Expected hybrid link destination to keep literal task shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("- [ ] "), "Hybrid link destination task shortcut must not convert into a task list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "hybrid-link-destination-quote-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .linkLiteral, action: .markerShortcut),
+                seedMarkdown: "[docs](dest-token)\n\nafter",
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+                ],
+                policyProfile: .hybridSyntax,
+                shortcutVariant: .quote,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("docs", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                },
+                perform: { _, textView in
+                    textView.insertText("> ", replacementRange: textView.selectedRange())
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+                    Self.moveCaretToSubstringStart("after", in: textView)
+                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("[docs]("), "Expected inline link export to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("dest-token"), "Expected hybrid link destination to retain the original token. got=\(exported)")
+                    XCTAssertTrue(exported.contains("\\>") || exported.contains("> dest-token"), "Expected hybrid link destination to preserve literal quote shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("> "), "Hybrid link destination quote shortcut must not convert into a blockquote. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "reference-definition-ordered-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .referenceLiteral, action: .markerShortcut),
+                seedMarkdown: """
+                [docs]: dest-token
+
+                [docs]
+                """,
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.markdown.rawValue,
+                ],
+                policyProfile: .markdownSyntax,
+                shortcutVariant: .ordered,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("1. ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("[docs]: 1. dest-token"),
+                        "Expected reference destination to keep literal ordered shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("1. "), "Reference literal ordered shortcut must not convert into a list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "reference-definition-marker-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .referenceLiteral, action: .markerShortcut),
+                seedMarkdown: """
+                [docs]: dest-token
+
+                [docs]
+                """,
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.markdown.rawValue,
+                ],
+                policyProfile: .markdownSyntax,
+                shortcutVariant: .bullet,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("- ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("[docs]: - dest-token"),
+                        "Expected reference destination to keep literal shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("- "), "Reference literal shortcut must not convert into a list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "reference-definition-task-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .referenceLiteral, action: .markerShortcut),
+                seedMarkdown: """
+                [docs]: dest-token
+
+                [docs]
+                """,
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.markdown.rawValue,
+                ],
+                policyProfile: .markdownSyntax,
+                shortcutVariant: .task,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("- [ ] ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(
+                        exported.contains("[docs]: - [ ] dest-token"),
+                        "Expected reference destination to keep literal task shortcut text. got=\(exported)"
+                    )
+                    XCTAssertFalse(exported.hasPrefix("- [ ] "), "Reference literal task shortcut must not convert into a task list. got=\(exported)")
+                }
+            )
+        )
+
+        out.append(
+            TransitionCase(
+                id: "reference-definition-quote-shortcut-stays-literal",
+                edge: TypingBehaviorEdge(context: .referenceLiteral, action: .markerShortcut),
+                seedMarkdown: """
+                [docs]: dest-token
+
+                [docs]
+                """,
+                defaults: [
+                    NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.markdown.rawValue,
+                ],
+                policyProfile: .markdownSyntax,
+                shortcutVariant: .quote,
+                prepare: { _, textView in
+                    Self.moveCaretToSubstringStart("dest-token", in: textView)
+                },
+                perform: { _, textView in
+                    textView.insertText("> ", replacementRange: textView.selectedRange())
+                },
+                assertExport: { exported in
+                    XCTAssertTrue(exported.contains("[docs]:"), "Expected reference definition export to remain intact. got=\(exported)")
+                    XCTAssertTrue(exported.contains("dest-token"), "Expected reference definition to retain the original token. got=\(exported)")
+                    XCTAssertTrue(exported.contains("> dest-token"), "Expected reference definition to preserve literal quote shortcut text. got=\(exported)")
+                    XCTAssertFalse(exported.hasPrefix("> "), "Reference literal quote shortcut must not convert into a blockquote. got=\(exported)")
                 }
             )
         )
@@ -1116,6 +1790,33 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
         textView.setSelectedRange(NSRange(location: range.location + range.length, length: 0))
     }
 
+    @MainActor
+    private static func moveCaretToTableCellContentStart(row: Int, col: Int, in textView: NativeMarkdownTextView) {
+        guard let storage = textView.textStorage else {
+            XCTFail("Missing text storage")
+            return
+        }
+        let full = NSRange(location: 0, length: storage.length)
+        var target: Int?
+        storage.enumerateAttributes(in: full, options: []) { attrs, range, stop in
+            let kindRaw = attrs[.kernBlockKind] as? Int
+            let kind = KernBlockKind(rawValue: kindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+            guard kind == .tableCell else { return }
+            let r = attrs[.kernTableRow] as? Int ?? -1
+            let c = attrs[.kernTableColumn] as? Int ?? -1
+            guard r == row, c == col else { return }
+            let ns = storage.string as NSString
+            let paragraphRange = ns.paragraphRange(for: NSRange(location: range.location, length: 0))
+            target = paragraphRange.location
+            stop.pointee = true
+        }
+        guard let target else {
+            XCTFail("Missing table cell row=\(row) col=\(col)")
+            return
+        }
+        textView.setSelectedRange(NSRange(location: target, length: 0))
+    }
+
     private static func firstCheckboxIndex(in storage: NSTextStorage, range: NSRange) -> Int? {
         var out: Int?
         storage.enumerateAttribute(.kernCheckbox, in: range, options: []) { value, r, stop in
@@ -1161,6 +1862,7 @@ final class NativeEditorTypingBehaviorMatrixCoverageTests: XCTestCase {
             saved[key] = defaults.object(forKey: key)
             defaults.set(value, forKey: key)
         }
+        NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
         defer {
             for (key, previous) in saved {
                 if let previous {

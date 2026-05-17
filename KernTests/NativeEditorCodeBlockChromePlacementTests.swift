@@ -67,7 +67,7 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
             var eff = NSRange(location: 0, length: 0)
             let kindRaw = storage.attribute(.kernBlockKind, at: tokenRange.location, effectiveRange: &eff) as? Int
             let kind = KernBlockKind(rawValue: kindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
-            if kind == .codeBlock, let codeRectText = rect(forCharacterRange: eff, in: textView) {
+            if kind == .codeBlock, let codeRectText = firstCodeBlockRect(containing: eff, in: textView) {
                 let codeRectContainer = vc.view.convert(codeRectText, from: textView)
                 let dTop = abs(copyFrame.midY - codeRectContainer.maxY)
                 let dBottom = abs(copyFrame.midY - codeRectContainer.minY)
@@ -78,6 +78,70 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
         } else {
             XCTFail("Missing text storage")
         }
+    }
+
+    @MainActor
+    func testChromeUsesReservedHeaderBandSoLongFirstLineNeverOverlaps() {
+        let md = """
+        Public key generation command:
+
+        ```bash
+        aws ec2-instance-connect send-ssh-public-key --instance-id i-0123456789abcdef0 --ssh-public-key file://~/.ssh/id_rsa.pub --region ap-northeast-2 --profile production-admin
+        ```
+        """
+
+        let vc = NativeEditorViewController()
+        _ = vc.view
+        vc.stringValue = md
+
+        let window = hostInWindow(vc: vc, size: NSSize(width: 860, height: 420), appearance: .init(named: .darkAqua))
+        window.displayIfNeeded()
+
+        guard let textView = findSubview(withAXIdentifier: "NativeEditor.TextView", in: vc.view) as? NSTextView else {
+            XCTFail("Missing NativeEditor.TextView")
+            return
+        }
+
+        let ns = textView.string as NSString
+        let introRange = ns.range(of: "Public key generation command:")
+        let tokenRange = ns.range(of: "aws ec2-instance-connect")
+        XCTAssertNotEqual(introRange.location, NSNotFound)
+        XCTAssertNotEqual(tokenRange.location, NSNotFound)
+        textView.setSelectedRange(NSRange(location: tokenRange.location, length: 0))
+
+        vc.view.layoutSubtreeIfNeeded()
+        vc.viewDidLayout()
+
+        guard let copyButton = findSubview(withAXIdentifier: "NativeEditor.CodeCopyButton", in: vc.view) as? NSButton,
+              let languageLabel = findSubview(withAXIdentifier: "NativeEditor.CodeLanguageLabel", in: vc.view) as? NSTextField,
+              let firstLineRectText = firstCodeLineRect(containing: tokenRange, in: textView),
+              let introRectText = paragraphRect(forCharacterRange: introRange, in: textView) else {
+            XCTFail("Missing chrome or surrounding paragraph geometry")
+            return
+        }
+
+        let copyFrame = copyButton.convert(copyButton.bounds, to: vc.view)
+        let labelFrame = languageLabel.convert(languageLabel.bounds, to: vc.view)
+        let chromeFrame = copyFrame.union(labelFrame)
+        let firstLineRect = vc.view.convert(firstLineRectText, from: textView)
+        let introRect = vc.view.convert(introRectText, from: textView)
+
+        XCTAssertFalse(chromeFrame.intersects(firstLineRect), "Reserved header band should keep chrome out of the first code line")
+        XCTAssertGreaterThanOrEqual(
+            introRect.minY - firstLineRect.maxY,
+            chromeFrame.height,
+            "Paragraph spacing above the code block should be large enough to fit the full chrome band"
+        )
+        XCTAssertGreaterThanOrEqual(
+            chromeFrame.minY,
+            firstLineRect.maxY,
+            "Chrome should stay at or above the first code line bounds"
+        )
+        XCTAssertLessThanOrEqual(
+            chromeFrame.maxY,
+            introRect.minY,
+            "Chrome should stay below the paragraph above instead of escaping upward"
+        )
     }
 
     @MainActor
@@ -286,6 +350,7 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
         return nil
     }
 
+    @MainActor
     private func rect(forCharacterRange range: NSRange, in textView: NSTextView) -> NSRect? {
         guard range.location != NSNotFound else { return nil }
         guard let lm = textView.layoutManager, let tc = textView.textContainer else { return nil }
@@ -296,6 +361,7 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
         return rect
     }
 
+    @MainActor
     private func paragraphRect(forCharacterRange range: NSRange, in textView: NSTextView) -> NSRect? {
         guard range.location != NSNotFound else { return nil }
         guard let storage = textView.textStorage, let lm = textView.layoutManager, let tc = textView.textContainer else { return nil }
@@ -309,6 +375,7 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
         return rect
     }
 
+    @MainActor
     private func codeBlockRects(in textView: NSTextView) -> [NSRect] {
         guard let storage = textView.textStorage else { return [] }
         guard let lm = textView.layoutManager, let tc = textView.textContainer else { return [] }
@@ -376,5 +443,83 @@ final class NativeEditorCodeBlockChromePlacementTests: XCTestCase {
         }
 
         return rects
+    }
+
+    @MainActor
+    private func firstCodeBlockRect(containing range: NSRange, in textView: NSTextView) -> NSRect? {
+        guard range.location != NSNotFound else { return nil }
+        guard let storage = textView.textStorage, let lm = textView.layoutManager, let tc = textView.textContainer else { return nil }
+        guard storage.length > 0, range.location < storage.length else { return nil }
+
+        let ns = storage.string as NSString
+        let para = ns.paragraphRange(for: NSRange(location: range.location, length: 0))
+        let codeBlockID = storage.attribute(.kernCodeBlockID, at: para.location, effectiveRange: nil) as? Int
+        let quoteDepth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
+
+        var start = para.location
+        var scan = start
+        while scan > 0 {
+            let prev = ns.paragraphRange(for: NSRange(location: max(0, scan - 1), length: 0))
+            if prev.length == 0 || prev.location >= storage.length { break }
+            let kindRaw = storage.attribute(.kernBlockKind, at: prev.location, effectiveRange: nil) as? Int
+            let kind = KernBlockKind(rawValue: kindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+            if kind != .codeBlock { break }
+            let prevQuoteDepth = (storage.attribute(.kernQuoteDepth, at: prev.location, effectiveRange: nil) as? Int) ?? 0
+            if prevQuoteDepth != quoteDepth { break }
+            let prevID = storage.attribute(.kernCodeBlockID, at: prev.location, effectiveRange: nil) as? Int
+            if prevID != codeBlockID { break }
+            start = prev.location
+            scan = prev.location
+        }
+
+        var end = para.location + para.length
+        scan = end
+        while scan < ns.length {
+            let next = ns.paragraphRange(for: NSRange(location: scan, length: 0))
+            if next.length == 0 || next.location >= storage.length { break }
+            let kindRaw = storage.attribute(.kernBlockKind, at: next.location, effectiveRange: nil) as? Int
+            let kind = KernBlockKind(rawValue: kindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+            if kind != .codeBlock { break }
+            let nextQuoteDepth = (storage.attribute(.kernQuoteDepth, at: next.location, effectiveRange: nil) as? Int) ?? 0
+            if nextQuoteDepth != quoteDepth { break }
+            let nextID = storage.attribute(.kernCodeBlockID, at: next.location, effectiveRange: nil) as? Int
+            if nextID != codeBlockID { break }
+            end = next.location + next.length
+            scan = end
+        }
+
+        let charRange = NSRange(location: start, length: max(0, end - start))
+        let glyphRange = lm.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+        var rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+        rect.origin.x += textView.textContainerOrigin.x
+        rect.origin.y += textView.textContainerOrigin.y
+        var lineSpanRect: NSRect?
+        if glyphRange.length > 0 {
+            var effective = NSRange(location: 0, length: 0)
+            var lf = lm.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: &effective)
+            lf.origin.x += textView.textContainerOrigin.x
+            lf.origin.y += textView.textContainerOrigin.y
+            let left = rect.minX
+            let right = lf.maxX
+            lineSpanRect = NSRect(x: left, y: lf.minY, width: max(0, right - left), height: lf.height)
+        }
+        return CodeBlockChromeGeometry.backgroundRect(forGlyphBoundingRect: rect, lineFragmentRect: lineSpanRect, isFlipped: textView.isFlipped)
+    }
+
+    @MainActor
+    private func firstCodeLineRect(containing range: NSRange, in textView: NSTextView) -> NSRect? {
+        guard range.location != NSNotFound else { return nil }
+        guard let lm = textView.layoutManager else { return nil }
+        let glyphRange = lm.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        var effective = NSRange(location: 0, length: 0)
+        var rect = lm.lineFragmentUsedRect(
+            forGlyphAt: glyphRange.location,
+            effectiveRange: &effective,
+            withoutAdditionalLayout: false
+        )
+        rect.origin.x += textView.textContainerOrigin.x
+        rect.origin.y += textView.textContainerOrigin.y
+        return rect
     }
 }

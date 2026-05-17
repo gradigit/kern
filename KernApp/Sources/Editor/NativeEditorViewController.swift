@@ -1,6 +1,57 @@
 import AppKit
 
+private func markdownImportRequiresMainActor(_ markdown: String) -> Bool {
+    if markdown.contains("![")
+        || markdown.contains("$$")
+        || markdown.contains("```mermaid")
+        || markdown.contains("~~~mermaid") {
+        return true
+    }
+
+    var marker: Character?
+    var markerCount = 0
+    var lineCouldBeThematicBreak = true
+
+    func resetLine() {
+        marker = nil
+        markerCount = 0
+        lineCouldBeThematicBreak = true
+    }
+
+    func lineIsThematicBreak() -> Bool {
+        lineCouldBeThematicBreak && markerCount >= 3
+    }
+
+    for character in markdown {
+        switch character {
+        case "\n", "\r":
+            if lineIsThematicBreak() {
+                return true
+            }
+            resetLine()
+        case " ", "\t":
+            continue
+        case "-", "*", "_":
+            guard lineCouldBeThematicBreak else { continue }
+            if let marker, marker != character {
+                lineCouldBeThematicBreak = false
+            } else {
+                marker = character
+                markerCount += 1
+            }
+        default:
+            lineCouldBeThematicBreak = false
+        }
+    }
+
+    return lineIsThematicBreak()
+}
+
 private actor StagedPromotionComputeWorker {
+    private static let stagePromotionImportPhaseProfilingEnabled: Bool = {
+        ProcessInfo.processInfo.environment["KERN_WOW_STAGED_PROMOTION_PHASE_PROFILE"] == "1"
+    }()
+
     struct ComputedContext {
         let contextStartUTF16: Int
         let contextOldMarkdown: String
@@ -28,6 +79,170 @@ private actor StagedPromotionComputeWorker {
             contextNewMarkdown: String(markdown[start..<newEnd])
         )
     }
+
+    private static func buildPromotionParseResult(
+        computed: ComputedContext,
+        parseOptions: NativeMarkdownCodec.Options,
+        baseURL: URL?,
+        referenceDefinitions: [String: NativeMarkdownCodec.ReferenceDefinition]?,
+        cachedContextBoundaryStartUTF16: Int?,
+        cachedContextBoundaryDisplayStart: Int?,
+        cachedContextBoundaryRenderedUTF16: Int?,
+        currentRenderedUTF16: Int,
+        currentRenderedDisplayBoundary: Int,
+        requiredMainActorImport: Bool
+    ) -> StagedPromotionParseResultBox {
+        autoreleasepool {
+            let oldContextUTF16Count = computed.contextOldMarkdown.utf16.count
+            let newContextUTF16Count = computed.contextNewMarkdown.utf16.count
+            var preludeImportMs = 0.0
+            let prelude: (Int, Bool) = {
+                if let cachedStart = cachedContextBoundaryStartUTF16,
+                   let cachedDisplayStart = cachedContextBoundaryDisplayStart,
+                   let cachedRenderedUTF16 = cachedContextBoundaryRenderedUTF16,
+                   cachedStart == computed.contextStartUTF16,
+                   cachedRenderedUTF16 == currentRenderedUTF16 {
+                    let candidate = currentRenderedDisplayBoundary - cachedDisplayStart
+                    if candidate >= 0 {
+                        return (candidate, true)
+                    }
+                }
+
+                var lengthOnlyOptions = parseOptions
+                lengthOnlyOptions.syntaxHighlightingEnabled = false
+                let preludeImportStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let oldAttributed = NativeMarkdownCodec.importMarkdown(
+                    computed.contextOldMarkdown,
+                    options: lengthOnlyOptions,
+                    baseURL: baseURL,
+                    precomputedReferenceDefinitions: referenceDefinitions
+                )
+                preludeImportMs = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - preludeImportStart) / 1_000_000
+                return (oldAttributed.length, false)
+            }()
+            let zeroOverlapFastPathEligible = oldContextUTF16Count == 0 && !prelude.1
+
+            let newImportProfile: NativeMarkdownCodec.ImportProfileSnapshot?
+            let newAttributed: NSAttributedString
+            if Self.stagePromotionImportPhaseProfilingEnabled {
+                let profiled = NativeMarkdownCodec.importMarkdownProfiled(
+                    computed.contextNewMarkdown,
+                    options: parseOptions,
+                    baseURL: baseURL,
+                    precomputedReferenceDefinitions: referenceDefinitions
+                )
+                newAttributed = profiled.attributed
+                newImportProfile = profiled.profile
+            } else {
+                newAttributed = NativeMarkdownCodec.importMarkdown(
+                    computed.contextNewMarkdown,
+                    options: parseOptions,
+                    baseURL: baseURL,
+                    precomputedReferenceDefinitions: referenceDefinitions
+                )
+                newImportProfile = nil
+            }
+            return StagedPromotionParseResultBox(
+                preludeDisplayLength: prelude.0,
+                contextNewAttributed: newAttributed,
+                preludeCacheHit: prelude.1,
+                preludeOldContextUTF16Count: oldContextUTF16Count,
+                preludeImportMs: preludeImportMs,
+                zeroOverlapFastPathEligible: zeroOverlapFastPathEligible,
+                contextOverlapUTF16Count: oldContextUTF16Count,
+                contextWindowUTF16Count: newContextUTF16Count,
+                requiredMainActorImport: requiredMainActorImport,
+                importPhaseDurationsMs: newImportProfile?.phaseDurationsMs ?? [:],
+                importPhaseCounts: newImportProfile?.phaseCounts ?? [:]
+            )
+        }
+    }
+
+    func parsePromotionContext(
+        computed: ComputedContext,
+        parseOptions: NativeMarkdownCodec.Options,
+        baseURL: URL?,
+        referenceDefinitions: [String: NativeMarkdownCodec.ReferenceDefinition]?,
+        cachedContextBoundaryStartUTF16: Int?,
+        cachedContextBoundaryDisplayStart: Int?,
+        cachedContextBoundaryRenderedUTF16: Int?,
+        currentRenderedUTF16: Int,
+        currentRenderedDisplayBoundary: Int
+    ) async -> StagedPromotionParseResultBox {
+        let requiresMainActorImport =
+            markdownImportRequiresMainActor(computed.contextOldMarkdown)
+            || markdownImportRequiresMainActor(computed.contextNewMarkdown)
+        if requiresMainActorImport {
+            return await MainActor.run {
+                Self.buildPromotionParseResult(
+                    computed: computed,
+                    parseOptions: parseOptions,
+                    baseURL: baseURL,
+                    referenceDefinitions: referenceDefinitions,
+                    cachedContextBoundaryStartUTF16: cachedContextBoundaryStartUTF16,
+                    cachedContextBoundaryDisplayStart: cachedContextBoundaryDisplayStart,
+                    cachedContextBoundaryRenderedUTF16: cachedContextBoundaryRenderedUTF16,
+                    currentRenderedUTF16: currentRenderedUTF16,
+                    currentRenderedDisplayBoundary: currentRenderedDisplayBoundary,
+                    requiredMainActorImport: true
+                )
+            }
+        }
+        return Self.buildPromotionParseResult(
+            computed: computed,
+            parseOptions: parseOptions,
+            baseURL: baseURL,
+            referenceDefinitions: referenceDefinitions,
+            cachedContextBoundaryStartUTF16: cachedContextBoundaryStartUTF16,
+            cachedContextBoundaryDisplayStart: cachedContextBoundaryDisplayStart,
+            cachedContextBoundaryRenderedUTF16: cachedContextBoundaryRenderedUTF16,
+            currentRenderedUTF16: currentRenderedUTF16,
+            currentRenderedDisplayBoundary: currentRenderedDisplayBoundary,
+            requiredMainActorImport: false
+        )
+    }
+
+    private static func buildFullImportBox(
+        _ markdown: String,
+        options: NativeMarkdownCodec.Options,
+        baseURL: URL?,
+        referenceDefinitions: [String: NativeMarkdownCodec.ReferenceDefinition]?
+    ) -> AttributedStringSendableBox {
+        autoreleasepool {
+            AttributedStringSendableBox(
+                NativeMarkdownCodec.importMarkdown(
+                    markdown,
+                    options: options,
+                    baseURL: baseURL,
+                    precomputedReferenceDefinitions: referenceDefinitions
+                )
+            )
+        }
+    }
+
+    func importFullMarkdown(
+        _ markdown: String,
+        options: NativeMarkdownCodec.Options,
+        baseURL: URL?,
+        referenceDefinitions: [String: NativeMarkdownCodec.ReferenceDefinition]?
+    ) async -> AttributedStringSendableBox {
+        if markdownImportRequiresMainActor(markdown) {
+            return await MainActor.run {
+                Self.buildFullImportBox(
+                    markdown,
+                    options: options,
+                    baseURL: baseURL,
+                    referenceDefinitions: referenceDefinitions
+                )
+            }
+        }
+        return Self.buildFullImportBox(
+            markdown,
+            options: options,
+            baseURL: baseURL,
+            referenceDefinitions: referenceDefinitions
+        )
+    }
 }
 
 private final class AttributedStringSendableBox: @unchecked Sendable {
@@ -42,11 +257,208 @@ private final class StagedPromotionParseResultBox: @unchecked Sendable {
     let preludeDisplayLength: Int
     let contextNewAttributed: NSAttributedString
     let preludeCacheHit: Bool
+    let preludeOldContextUTF16Count: Int
+    let preludeImportMs: Double
+    let zeroOverlapFastPathEligible: Bool
+    let contextOverlapUTF16Count: Int
+    let contextWindowUTF16Count: Int
+    let requiredMainActorImport: Bool
+    let importPhaseDurationsMs: [String: Double]
+    let importPhaseCounts: [String: Int]
 
-    init(preludeDisplayLength: Int, contextNewAttributed: NSAttributedString, preludeCacheHit: Bool) {
+    init(
+        preludeDisplayLength: Int,
+        contextNewAttributed: NSAttributedString,
+        preludeCacheHit: Bool,
+        preludeOldContextUTF16Count: Int,
+        preludeImportMs: Double,
+        zeroOverlapFastPathEligible: Bool,
+        contextOverlapUTF16Count: Int,
+        contextWindowUTF16Count: Int,
+        requiredMainActorImport: Bool,
+        importPhaseDurationsMs: [String: Double] = [:],
+        importPhaseCounts: [String: Int] = [:]
+    ) {
         self.preludeDisplayLength = preludeDisplayLength
         self.contextNewAttributed = contextNewAttributed
         self.preludeCacheHit = preludeCacheHit
+        self.preludeOldContextUTF16Count = preludeOldContextUTF16Count
+        self.preludeImportMs = preludeImportMs
+        self.zeroOverlapFastPathEligible = zeroOverlapFastPathEligible
+        self.contextOverlapUTF16Count = contextOverlapUTF16Count
+        self.contextWindowUTF16Count = contextWindowUTF16Count
+        self.requiredMainActorImport = requiredMainActorImport
+        self.importPhaseDurationsMs = importPhaseDurationsMs
+        self.importPhaseCounts = importPhaseCounts
+    }
+}
+
+struct StagedPromotionAdaptiveBudgetSnapshot {
+    let rollingParseP50Ms: Double
+    let rollingParseP95Ms: Double
+    let rollingApplyP50Ms: Double
+    let rollingApplyP95Ms: Double
+    let stableLowPressureStreak: Int
+    let idleBoostSuppressed: Bool
+    let microStepChars: Int
+}
+
+struct StagedPromotionAdaptiveBudgetController {
+    private let resetMicroStepChars: Int
+    private let minMicroStepChars: Int
+    private let normalMaxMicroStepChars: Int
+    private let turboMaxMicroStepChars: Int
+    private let stableWindowRequired: Int
+    private let historyLimit: Int
+
+    private(set) var microStepChars: Int
+    private(set) var idleBoostSuppressed = false
+    private(set) var stableLowPressureStreak = 0
+    private var recentParseMs: [Double] = []
+    private var recentApplyMs: [Double] = []
+
+    init(
+        resetMicroStepChars: Int,
+        minMicroStepChars: Int,
+        normalMaxMicroStepChars: Int,
+        turboMaxMicroStepChars: Int,
+        stableWindowRequired: Int = 3,
+        historyLimit: Int = 8
+    ) {
+        self.resetMicroStepChars = resetMicroStepChars
+        self.minMicroStepChars = minMicroStepChars
+        self.normalMaxMicroStepChars = normalMaxMicroStepChars
+        self.turboMaxMicroStepChars = turboMaxMicroStepChars
+        self.stableWindowRequired = max(2, stableWindowRequired)
+        self.historyLimit = max(4, historyLimit)
+        microStepChars = max(minMicroStepChars, resetMicroStepChars)
+    }
+
+    mutating func reset() {
+        microStepChars = max(minMicroStepChars, resetMicroStepChars)
+        idleBoostSuppressed = false
+        stableLowPressureStreak = 0
+        recentParseMs.removeAll(keepingCapacity: true)
+        recentApplyMs.removeAll(keepingCapacity: true)
+    }
+
+    mutating func tune(
+        lastApplyMs: Double,
+        lastParseMs: Double,
+        useTurbo: Bool,
+        frameBudgetMs: Double,
+        requiredMainActorImport: Bool = true
+    ) -> StagedPromotionAdaptiveBudgetSnapshot {
+        Self.append(lastParseMs, to: &recentParseMs, historyLimit: historyLimit)
+        Self.append(lastApplyMs, to: &recentApplyMs, historyLimit: historyLimit)
+
+        let rollingParseP50 = Self.percentile(recentParseMs, percentile: 0.50)
+        let rollingParseP95 = Self.percentile(recentParseMs, percentile: 0.95)
+        let rollingApplyP50 = Self.percentile(recentApplyMs, percentile: 0.50)
+        let rollingApplyP95 = Self.percentile(recentApplyMs, percentile: 0.95)
+
+        let lowPressureParseThreshold = useTurbo
+            ? (requiredMainActorImport ? 360.0 : 520.0)
+            : 80.0
+        let lowPressureApplyThreshold = useTurbo
+            ? max(10.0, frameBudgetMs * 2.5)
+            : max(2.0, frameBudgetMs * 0.65)
+        let parseRecoveryPressure = max(lastParseMs, rollingParseP95)
+        let applyRecoveryPressure = max(lastApplyMs, rollingApplyP95)
+        let lowPressure = lastParseMs <= lowPressureParseThreshold
+            && lastApplyMs <= lowPressureApplyThreshold
+
+        if lowPressure {
+            stableLowPressureStreak += 1
+        } else {
+            stableLowPressureStreak = 0
+        }
+
+        let suppressParseThreshold = useTurbo
+            ? (requiredMainActorImport ? 520.0 : 900.0)
+            : 110.0
+        if idleBoostSuppressed, stableLowPressureStreak >= stableWindowRequired {
+            idleBoostSuppressed = false
+        } else if parseRecoveryPressure > suppressParseThreshold {
+            idleBoostSuppressed = true
+        }
+
+        let parseBudgetPressure = useTurbo && stableLowPressureStreak >= stableWindowRequired
+            ? max(lastParseMs, rollingParseP50)
+            : parseRecoveryPressure
+
+        let overHardApplyBudget: Bool
+        let overSoftApplyBudget: Bool
+        let overHardParseBudget: Bool
+        let overSoftParseBudget: Bool
+        let growthApplyThreshold: Double
+        let growthParseThreshold: Double
+        let growthParsePressure: Double
+        let growthMultiplier: Double
+        if useTurbo {
+            overHardApplyBudget = applyRecoveryPressure > max(36.0, frameBudgetMs * 9.0)
+            overSoftApplyBudget = max(lastApplyMs, rollingApplyP50) > max(18.0, frameBudgetMs * 4.5)
+            overHardParseBudget = parseBudgetPressure > (requiredMainActorImport ? 700.0 : 1_100.0)
+            overSoftParseBudget = max(lastParseMs, rollingParseP50) > (requiredMainActorImport ? 420.0 : 650.0)
+            growthApplyThreshold = max(8.0, frameBudgetMs * 2.0)
+            growthParseThreshold = requiredMainActorImport ? 320.0 : 480.0
+            growthParsePressure = max(lastParseMs, rollingParseP50)
+            growthMultiplier = 1.18
+        } else {
+            overHardApplyBudget = applyRecoveryPressure > max(16.0, frameBudgetMs * 4.0)
+            overSoftApplyBudget = max(lastApplyMs, rollingApplyP50) > max(8.0, frameBudgetMs * 2.0)
+            overHardParseBudget = parseBudgetPressure > 150.0
+            overSoftParseBudget = max(lastParseMs, rollingParseP50) > 100.0
+            growthApplyThreshold = max(2.0, frameBudgetMs * 0.65)
+            growthParseThreshold = 85.0
+            growthParsePressure = max(lastParseMs, rollingParseP50)
+            growthMultiplier = 1.12
+        }
+
+        var next = microStepChars
+        if overHardParseBudget {
+            next = Int(Double(next) * (useTurbo ? 0.68 : 0.72))
+        } else if overHardApplyBudget || lastApplyMs > 50 {
+            next = Int(Double(next) * 0.8)
+        } else if overSoftParseBudget {
+            next = Int(Double(next) * (useTurbo ? 0.76 : 0.84))
+        } else if overSoftApplyBudget {
+            next = Int(Double(next) * 0.9)
+        } else if stableLowPressureStreak >= stableWindowRequired,
+                  applyRecoveryPressure < growthApplyThreshold,
+                  growthParsePressure < growthParseThreshold {
+            next = Int(Double(next) * growthMultiplier)
+        }
+
+        let maxMicroStepChars = useTurbo ? turboMaxMicroStepChars : normalMaxMicroStepChars
+        microStepChars = max(minMicroStepChars, min(next, maxMicroStepChars))
+
+        return StagedPromotionAdaptiveBudgetSnapshot(
+            rollingParseP50Ms: rollingParseP50,
+            rollingParseP95Ms: rollingParseP95,
+            rollingApplyP50Ms: rollingApplyP50,
+            rollingApplyP95Ms: rollingApplyP95,
+            stableLowPressureStreak: stableLowPressureStreak,
+            idleBoostSuppressed: idleBoostSuppressed,
+            microStepChars: microStepChars
+        )
+    }
+
+    private static func append(_ value: Double, to samples: inout [Double], historyLimit: Int) {
+        samples.append(max(0, value))
+        let overflow = samples.count - historyLimit
+        if overflow > 0 {
+            samples.removeFirst(overflow)
+        }
+    }
+
+    private static func percentile(_ samples: [Double], percentile: Double) -> Double {
+        guard !samples.isEmpty else { return 0 }
+        let sorted = samples.sorted()
+        if sorted.count == 1 { return sorted[0] }
+        let clamped = max(0, min(1, percentile))
+        let index = Int((Double(sorted.count - 1) * clamped).rounded())
+        return sorted[min(max(0, index), sorted.count - 1)]
     }
 }
 
@@ -58,6 +470,8 @@ private final class StagedPromotionParseResultBox: @unchecked Sendable {
 /// - exporting back to deterministic Markdown
 @MainActor
 final class NativeEditorViewController: NSViewController, NSTextViewDelegate, NativeMarkdownTextViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    nonisolated static let defaultStagedPromotionViewportMicroStepChars = 448_000
+    nonisolated static let defaultStagedPromotionTurboViewportMicroStepMaxChars = 640_000
 
     private let splitView = NSSplitView()
     private let headingOutlineContainer = NSView()
@@ -162,6 +576,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private let fullLayoutForceCharThreshold = 12_000
     private var largeDocumentLightLayoutWorkItem: DispatchWorkItem?
     private var deferredFullRenderWorkItem: DispatchWorkItem?
+    private var deferredFullRenderParseTask: Task<Void, Never>?
     private var deferredFullRenderParseToken: UInt64 = 0
     private var scrollChromeUpdateWorkItem: DispatchWorkItem?
     private var stagedPromotionWorkItem: DispatchWorkItem?
@@ -189,19 +604,22 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private let stagedOpenVeryLargeDeferredQuietPeriodMs = 4_000
     private let stagedOpenDeferredFullDisableThreshold = 250_000
     private let stagedPromotionDebounceMs = 30
-    private let stagedPromotionFollowupDelayMs = 10
+    private let stagedPromotionFollowupDelayMs = 4
     private let stagedPromotionStepChars = 450_000
     private let stagedPromotionMaxCatchupStepChars = 4_000_000
-    private let stagedPromotionTurboFollowupDelayMs = 6
+    private let stagedPromotionTurboFollowupDelayMs = 2
     private let stagedPromotionTurboStepChars = 4_000_000
     private let stagedPromotionTurboMaxCatchupStepChars = 8_000_000
-    private let stagedPromotionTurboActivateIdleMs = 250
-    private let stagedPromotionContextChars = 3_000
+    private let stagedPromotionTurboActivateIdleMs = 120
+    private let stagedPromotionContextChars = 1_000
     private let stagedPromotionViewportGuardChars = 400
-    private let stagedPromotionViewportMicroStepChars = 448_000
+    // Keep product defaults conservative. Large 1–2M slice caps are reserved for
+    // benchmark-only wrapper profiles so diagnostic tuning does not leak into
+    // user-facing full-fidelity behavior.
+    private let stagedPromotionViewportMicroStepChars = NativeEditorViewController.defaultStagedPromotionViewportMicroStepChars
     private let stagedPromotionViewportMicroStepMinChars = 128_000
     private let stagedPromotionViewportMicroStepMaxChars = 2_400_000
-    private let stagedPromotionTurboViewportMicroStepMaxChars = 640_000
+    private let stagedPromotionTurboViewportMicroStepMaxChars = NativeEditorViewController.defaultStagedPromotionTurboViewportMicroStepMaxChars
     private let stagedPromotionIdleQuietPeriodMs = 40
     private let stagedPromotionScrollQuietPeriodMs = 90
     private let stagedPromotionLookaheadVisibleChars = 220_000
@@ -228,7 +646,12 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private let stagedDeferredSyntaxHighlightingThresholdChars = 250_000
     private let stagedDeferredSyntaxHighlightBatchLimit = 10
     private let stagedDeferredSyntaxHighlightBatchBudgetMs = 5.5
-    private var stagedAdaptiveViewportMicroStepChars: Int = 256_000
+    private lazy var stagedAdaptiveBudget = StagedPromotionAdaptiveBudgetController(
+        resetMicroStepChars: stagedPromotionViewportMicroStepChars,
+        minMicroStepChars: stagedPromotionViewportMicroStepMinChars,
+        normalMaxMicroStepChars: stagedPromotionViewportMicroStepMaxChars,
+        turboMaxMicroStepChars: stagedPromotionTurboViewportMicroStepMaxChars
+    )
     private var pendingEditMutation: PendingEditMutation?
     private var pendingStagedRecoveryAfterExport: Bool = false
     private var pendingRenderRefreshAfterExport: Bool = false
@@ -862,7 +1285,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let currentGeneration = renderGeneration
         deferredFullRenderWorkItem?.cancel()
         deferredFullRenderWorkItem = nil
+        deferredFullRenderParseTask?.cancel()
+        deferredFullRenderParseTask = nil
         deferredFullRenderToken &+= 1
+        deferredFullRenderParseToken &+= 1
         stagedPromotionWorkItem?.cancel()
         stagedPromotionWorkItem = nil
         stagedPromotionLayoutWorkItem?.cancel()
@@ -981,6 +1407,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if let scrollOrigin {
             scrollView.contentView.scroll(to: scrollOrigin)
             scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+
+        if syntaxVisibilityMode.isHybridCaretSyntaxMode, !isApplyingHybridInlineTransition {
+            maybeApplyHybridInlineExpansionForSelection()
         }
 
         if syntaxVisibilityMode.isSyntaxVisible {
@@ -1405,43 +1835,55 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             let scrollOrigin = self.scrollView.contentView.bounds.origin
             let baseURL = self.documentURL
             let referenceDefinitions = self.currentStagedReferenceDefinitions(for: generation)
+            let parseWorker = self.stagedPromotionComputeWorker
+            self.deferredFullRenderParseTask?.cancel()
+            self.deferredFullRenderParseTask = nil
             self.deferredFullRenderParseToken &+= 1
             let parseToken = self.deferredFullRenderParseToken
-            let fullBox = AttributedStringSendableBox(
-                NativeMarkdownCodec.importMarkdown(
+            self.deferredFullRenderParseTask = Task(priority: .userInitiated) { [weak self] in
+                let fullBox = await parseWorker.importFullMarkdown(
                     markdown,
                     options: options,
                     baseURL: baseURL,
-                    precomputedReferenceDefinitions: referenceDefinitions
+                    referenceDefinitions: referenceDefinitions
                 )
-            )
+                guard !Task.isCancelled else { return }
 
-            guard token == self.deferredFullRenderToken else { return }
-            guard parseToken == self.deferredFullRenderParseToken else { return }
-            guard generation == self.renderGeneration else { return }
-            guard self.stringValue == markdown else { return }
-            guard !self.hasUnexportedChanges else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    defer {
+                        if self.deferredFullRenderParseToken == parseToken {
+                            self.deferredFullRenderParseTask = nil
+                        }
+                    }
+                    guard token == self.deferredFullRenderToken else { return }
+                    guard parseToken == self.deferredFullRenderParseToken else { return }
+                    guard generation == self.renderGeneration else { return }
+                    guard self.stringValue == markdown else { return }
+                    guard !self.hasUnexportedChanges else { return }
 
-            // Deferred full render is an external visual upgrade, not a user edit.
-            // Keep it out of textDidChange side-effects (dirty state, export debounce).
-            self.isApplyingExternalUpdate = true
-            defer { self.isApplyingExternalUpdate = false }
-            self.textView.textStorage?.setAttributedString(fullBox.value)
-            self.rebuildHeadingOutlineFromStorage()
-            self.adjustDocumentViewHeightToContent(forceFullLayout: false)
-            self.scheduleLargeDocumentLightLayoutIfNeeded(markdown: markdown)
+                    // Deferred full render is an external visual upgrade, not a user edit.
+                    // Keep it out of textDidChange side-effects (dirty state, export debounce).
+                    self.isApplyingExternalUpdate = true
+                    defer { self.isApplyingExternalUpdate = false }
+                    self.textView.textStorage?.setAttributedString(fullBox.value)
+                    self.rebuildHeadingOutlineFromStorage()
+                    self.adjustDocumentViewHeightToContent(forceFullLayout: false)
+                    self.scheduleLargeDocumentLightLayoutIfNeeded(markdown: markdown)
 
-            let safeLocation = min(selection.location, max(0, self.textView.string.utf16.count))
-            let safeLength = min(selection.length, max(0, self.textView.string.utf16.count - safeLocation))
-            self.textView.setSelectedRange(NSRange(location: safeLocation, length: safeLength))
-            self.scrollView.contentView.scroll(to: scrollOrigin)
-            self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
+                    let safeLocation = min(selection.location, max(0, self.textView.string.utf16.count))
+                    let safeLength = min(selection.length, max(0, self.textView.string.utf16.count - safeLocation))
+                    self.textView.setSelectedRange(NSRange(location: safeLocation, length: safeLength))
+                    self.scrollView.contentView.scroll(to: scrollOrigin)
+                    self.scrollView.reflectScrolledClipView(self.scrollView.contentView)
 
-            self.updateCodeBlockChrome()
-            self.scheduleFindUpdate(resetIndex: false, anchorLocation: nil)
+                    self.updateCodeBlockChrome()
+                    self.scheduleFindUpdate(resetIndex: false, anchorLocation: nil)
 
-            self.finalizeStagedPromotionCompletion()
-            self.deferredFullRenderWorkItem = nil
+                    self.finalizeStagedPromotionCompletion()
+                    self.deferredFullRenderWorkItem = nil
+                }
+            }
         }
 
         deferredFullRenderWorkItem = work
@@ -1578,10 +2020,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     // MARK: - NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
-        noteUserInteraction()
         guard !isApplyingExternalUpdate else { return }
         guard !isApplyingInputRules else { return }
         guard !isApplyingAutoNewline else { return }
+        noteUserInteraction()
         suppressHybridExpansionForCurrentRunLoop = true
         DispatchQueue.main.async { [weak self] in
             self?.suppressHybridExpansionForCurrentRunLoop = false
@@ -1618,7 +2060,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if deferredFullRenderWorkItem != nil {
             deferredFullRenderWorkItem?.cancel()
             deferredFullRenderWorkItem = nil
+            deferredFullRenderParseTask?.cancel()
+            deferredFullRenderParseTask = nil
             deferredFullRenderToken &+= 1
+            deferredFullRenderParseToken &+= 1
         }
 
         WowInternalMetricsRecorder.shared.endEditApply()
@@ -1807,13 +2252,27 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             let editEnd = affectedCharRange.location + affectedCharRange.length
             let activeStart = active.sourceRange.location
             let activeEnd = active.sourceRange.location + active.sourceRange.length
+            let isInsertion = affectedCharRange.length == 0
+            let insertionAtActiveTrailingBoundary = isInsertion && editStart == activeEnd
 
-            if editEnd <= activeStart {
+            if insertionAtActiveTrailingBoundary {
+                if !replacement.isEmpty,
+                   collapseActiveHybridExpansionAndInsertTrailingText(replacement, active: active) {
+                    pendingEditMutation = nil
+                    return false
+                }
+                suppressHybridExpansionForCurrentRunLoop = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.suppressHybridExpansionForCurrentRunLoop = false
+                }
+            }
+
+            if editEnd < activeStart || (!isInsertion && editEnd <= activeStart) {
                 active.sourceRange.location = max(0, active.sourceRange.location + delta)
                 activeHybridInlineExpansion = active
             } else {
                 let overlapsRange = editStart < activeEnd && editEnd > activeStart
-                let insertionWithinRange = affectedCharRange.length == 0 && editStart >= activeStart && editStart <= activeEnd
+                let insertionWithinRange = isInsertion && editStart >= activeStart && editStart < activeEnd
                 if overlapsRange || insertionWithinRange {
                     active.sourceRange.length = max(0, active.sourceRange.length + delta)
                     activeHybridInlineExpansion = active
@@ -1893,6 +2352,65 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             return false
         }
 
+        return true
+    }
+
+    private func collapseActiveHybridExpansionAndInsertTrailingText(
+        _ replacement: String,
+        active: HybridInlineExpansionState
+    ) -> Bool {
+        guard !replacement.isEmpty else { return false }
+        guard syntaxVisibilityMode.isHybridCaretSyntaxMode else { return false }
+        guard let storage = textView.textStorage else { return false }
+
+        let sourceRange = active.sourceRange
+        let end = sourceRange.location + sourceRange.length
+        guard sourceRange.location >= 0,
+              sourceRange.length > 0,
+              sourceRange.location <= storage.length,
+              end <= storage.length else {
+            return false
+        }
+
+        let sourceMarkdown = (storage.string as NSString).substring(with: sourceRange)
+        let options = NativeMarkdownCodec.Options.fromUserDefaults()
+        var imported = NativeMarkdownCodec.importMarkdown(sourceMarkdown, options: options, baseURL: documentURL)
+        while imported.length > 0, imported.string.hasSuffix("\n") {
+            imported = NSAttributedString(
+                attributedString: imported.attributedSubstring(from: NSRange(location: 0, length: imported.length - 1))
+            )
+        }
+
+        activeHybridInlineExpansion = nil
+        isApplyingInputRules = true
+        defer { isApplyingInputRules = false }
+        textView.undoManager?.beginUndoGrouping()
+        defer { textView.undoManager?.endUndoGrouping() }
+
+        storage.beginEditing()
+        storage.replaceCharacters(in: sourceRange, with: imported)
+        let insertionLocation = min(storage.length, sourceRange.location + imported.length)
+        var insertionAttributes = sanitizedTypingAttributesWithoutLinkLeak(
+            at: insertionLocation,
+            storage: storage,
+            fallback: textView.typingAttributes
+        )
+        insertionAttributes.removeValue(forKey: .kernHybridExpandedInlineLink)
+        insertionAttributes.removeValue(forKey: .kernHybridExpandedInlineSyntax)
+        let attributedReplacement = NSAttributedString(string: replacement, attributes: insertionAttributes)
+        storage.replaceCharacters(in: NSRange(location: insertionLocation, length: 0), with: attributedReplacement)
+        storage.endEditing()
+
+        let newCaret = min(storage.length, insertionLocation + attributedReplacement.length)
+        textView.setSelectedRange(NSRange(location: newCaret, length: 0))
+        textView.typingAttributes = insertionAttributes
+        textView.didChangeText()
+
+        adjustDocumentViewHeightToContent(forceFullLayout: false)
+        updateCodeBlockChrome()
+        scheduleHeadingOutlineRefresh()
+        scheduleFindUpdate(resetIndex: false, anchorLocation: nil)
+        scheduleExport()
         return true
     }
 
@@ -2162,13 +2680,18 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             attrs = textView.typingAttributes
         }
 
-        let keysToRemove: [NSAttributedString.Key] = [
+        let blockKindRaw = attrs[.kernBlockKind] as? Int
+        let blockKind = KernBlockKind(rawValue: blockKindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+
+        var keysToRemove: [NSAttributedString.Key] = [
             .kernMarker,
             .kernCheckbox,
             .kernCheckboxChecked,
-            .kernCodeLanguage,
-            .kernCodeBlockID,
         ]
+        if blockKind != .codeBlock {
+            keysToRemove.append(.kernCodeLanguage)
+            keysToRemove.append(.kernCodeBlockID)
+        }
         for key in keysToRemove {
             attrs.removeValue(forKey: key)
         }
@@ -2186,6 +2709,16 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             attrs[.foregroundColor] = NativeEditorAppearance.primaryTextColor()
         }
         return attrs
+    }
+
+    private func syncTypingAttributesForSelectionIfNeeded() {
+        guard let storage = textView.textStorage else { return }
+        let selection = textView.selectedRange()
+        let insertionTarget = min(max(0, selection.location), storage.length)
+        textView.typingAttributes = sanitizedMarkerRecoveryAttributes(
+            storage: storage,
+            insertionTarget: insertionTarget
+        )
     }
 
     private func caretCarryLocationAfterSoftBreak(caret: Int, storage: NSTextStorage) -> Int {
@@ -2206,9 +2739,11 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if isApplyingHybridInlineTransition {
             return
         }
+        maybeCollapseActiveHybridInlineExpansionForSelectionIfNeeded()
         if !suppressHybridExpansionForCurrentRunLoop {
             maybeApplyHybridInlineExpansionForSelection()
         }
+        syncTypingAttributesForSelectionIfNeeded()
         sanitizeTypingAttributesAfterLinkBoundaryIfNeeded()
         updateSpellcheckBehaviorForSelection()
         updateCodeBlockChrome()
@@ -2241,6 +2776,22 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
         guard let candidate = hybridInlineSpanCandidate(at: caret, storage: storage) else { return }
         expandHybridInlineSpan(candidate: candidate, storage: storage, caret: caret)
+    }
+
+    private func maybeCollapseActiveHybridInlineExpansionForSelectionIfNeeded() {
+        guard let active = activeHybridInlineExpansion else { return }
+        let selection = textView.selectedRange()
+        guard selection.length == 0 else {
+            collapseHybridInlineExpansionIfNeeded()
+            return
+        }
+
+        let caret = selection.location
+        let activeStart = active.sourceRange.location
+        let activeEnd = active.sourceRange.location + active.sourceRange.length
+        if caret < activeStart || caret > activeEnd {
+            collapseHybridInlineExpansionIfNeeded()
+        }
     }
 
     private func hybridInlineSpanCandidate(
@@ -2866,17 +3417,19 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             rawString = nil
         }
         guard let url else { return nil }
-        let resolved = resolveExternalNavigableURL(url, rawString: rawString)
+        guard let resolved = resolveExternalNavigableURL(url, rawString: rawString) else { return nil }
         guard let scheme = resolved.scheme?.lowercased() else { return nil }
         switch scheme {
-        case "http", "https", "mailto", "file":
+        case "http", "https", "mailto":
             return resolved
+        case "file":
+            return isAllowedFileNavigationURL(resolved) ? resolved : nil
         default:
             return nil
         }
     }
 
-    private func resolveExternalNavigableURL(_ url: URL, rawString: String?) -> URL {
+    private func resolveExternalNavigableURL(_ url: URL, rawString: String?) -> URL? {
         // Keep already absolute URLs untouched.
         if url.scheme != nil { return url }
 
@@ -2888,40 +3441,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             return webURL
         }
 
-        if url.path.hasPrefix("/") {
-            var components = URLComponents(url: URL(fileURLWithPath: url.path).standardizedFileURL, resolvingAgainstBaseURL: false)
-            components?.query = url.query
-            components?.fragment = url.fragment
-            return components?.url ?? URL(fileURLWithPath: url.path).standardizedFileURL
-        }
+        guard !url.path.hasPrefix("/"), !url.path.hasPrefix("~/") else { return nil }
 
-        if url.path.hasPrefix("~/") {
-            let home = NSHomeDirectory() as NSString
-            let expanded = home.appendingPathComponent(String(url.path.dropFirst(2)))
-            var components = URLComponents(url: URL(fileURLWithPath: expanded).standardizedFileURL, resolvingAgainstBaseURL: false)
-            components?.query = url.query
-            components?.fragment = url.fragment
-            return components?.url ?? URL(fileURLWithPath: expanded).standardizedFileURL
-        }
-
-        if let docURL = documentURL {
-            let baseDirectory = docURL.deletingLastPathComponent()
+        if let baseDirectory = trustedDocumentLinkBaseDirectory() {
             let resolved = URL(fileURLWithPath: url.path, relativeTo: baseDirectory).standardizedFileURL
+            guard isContainedWithinTrustedDocumentBase(resolved, baseDirectory: baseDirectory) else { return nil }
             var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
             components?.query = url.query
             components?.fragment = url.fragment
             return components?.url ?? resolved
         }
-
-        // Last fallback when we only have a raw relative string.
-        if let rawString,
-           let parsed = URL(string: rawString),
-           parsed.scheme == nil,
-           parsed.path.hasPrefix("/") {
-            return URL(fileURLWithPath: parsed.path).standardizedFileURL
-        }
-
-        return url
+        return nil
     }
 
     private func normalizedBareWebURL(from raw: String) -> URL? {
@@ -2929,6 +3459,28 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         guard looksLikeBareWebDestination(value) else { return nil }
         guard !value.lowercased().hasPrefix("http://"), !value.lowercased().hasPrefix("https://") else { return nil }
         return URL(string: "https://\(value)")
+    }
+
+    private func trustedDocumentLinkBaseDirectory() -> URL? {
+        guard let documentURL, documentURL.isFileURL else { return nil }
+        return documentURL.deletingLastPathComponent().standardizedFileURL
+    }
+
+    private func isAllowedFileNavigationURL(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        guard let baseDirectory = trustedDocumentLinkBaseDirectory() else { return false }
+        return isContainedWithinTrustedDocumentBase(url, baseDirectory: baseDirectory)
+    }
+
+    private func isContainedWithinTrustedDocumentBase(_ url: URL, baseDirectory: URL) -> Bool {
+        let candidatePath = resolvedTrustedDocumentPath(url)
+        let basePath = resolvedTrustedDocumentPath(baseDirectory)
+        if candidatePath == basePath { return true }
+        return candidatePath.hasPrefix(basePath.hasSuffix("/") ? basePath : basePath + "/")
+    }
+
+    private func resolvedTrustedDocumentPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     private func looksLikeBareWebDestination(_ raw: String) -> Bool {
@@ -2999,7 +3551,26 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         fallback: [NSAttributedString.Key: Any]
     ) -> [NSAttributedString.Key: Any] {
         var attrs: [NSAttributedString.Key: Any]
-        if location > 0, location - 1 < storage.length {
+        let ns = storage.string as NSString
+        let isParagraphBoundaryInsertion = {
+            guard location > 0, location <= ns.length else { return location == 0 }
+            return ns.character(at: location - 1) == 10
+        }()
+
+        if location < storage.length, isParagraphBoundaryInsertion {
+            let currentAttrs = storage.attributes(at: location, effectiveRange: nil)
+            let previousAttrs = location > 0 ? storage.attributes(at: location - 1, effectiveRange: nil) : fallback
+            let currentKindRaw = currentAttrs[.kernBlockKind] as? Int
+            let currentKind = KernBlockKind(rawValue: currentKindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+            let previousKindRaw = previousAttrs[.kernBlockKind] as? Int
+            let previousKind = KernBlockKind(rawValue: previousKindRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+
+            if currentKind == .paragraph, previousKind == .codeBlock {
+                attrs = previousAttrs
+            } else {
+                attrs = currentAttrs
+            }
+        } else if location > 0, location - 1 < storage.length {
             attrs = storage.attributes(at: location - 1, effectiveRange: nil)
         } else if location < storage.length {
             attrs = storage.attributes(at: location, effectiveRange: nil)
@@ -3028,6 +3599,18 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         ]
         for key in markerKeys where attrs[key] != nil {
             attrs.removeValue(forKey: key)
+        }
+
+        let fallbackQuoteDepth = max(0, fallback[.kernQuoteDepth] as? Int ?? 0)
+        let resolvedQuoteDepth = max(0, attrs[.kernQuoteDepth] as? Int ?? 0)
+        if fallbackQuoteDepth > 0, resolvedQuoteDepth == 0 {
+            attrs[.kernQuoteDepth] = fallbackQuoteDepth
+            if attrs[.kernBlockKind] == nil {
+                attrs[.kernBlockKind] = KernBlockKind.paragraph.rawValue
+            }
+            if let fallbackStyle = fallback[.paragraphStyle] {
+                attrs[.paragraphStyle] = fallbackStyle
+            }
         }
 
         if let underline = attrs[.underlineStyle] as? Int,
@@ -3170,6 +3753,9 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             if withinStabilityWindow {
                 let safeSel = min(max(0, sel.location), max(0, ns.length - 1))
                 let selPara = ns.paragraphRange(for: NSRange(location: safeSel, length: 0))
+                if selPara.location != targetLoc, sel.location < targetLoc {
+                    shouldRejump = true
+                }
                 if selPara.location == targetLoc, let target = paragraphRect(forCharIndex: targetLoc) {
                     let targetVisible = visible.intersects(target.rect)
                     let targetDistanceFromTop = distanceFromTop(targetRect: target.rect, visibleRect: visible)
@@ -3199,12 +3785,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
         pendingAnchorJumpWorkItem?.cancel()
         let anchor = guardState.anchor
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            _ = self.jumpToAnchor(anchor)
+        if containsLinkIndex {
+            pendingAnchorJumpWorkItem = nil
+            _ = jumpToAnchor(anchor)
+        } else {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                _ = self.jumpToAnchor(anchor)
+            }
+            pendingAnchorJumpWorkItem = work
+            DispatchQueue.main.async(execute: work)
         }
-        pendingAnchorJumpWorkItem = work
-        DispatchQueue.main.async(execute: work)
     }
 
     private func scheduleAnchorJumpGuardHeartbeat(attempt: Int) {
@@ -3569,7 +4160,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         )
         deferredFullRenderWorkItem?.cancel()
         deferredFullRenderWorkItem = nil
+        deferredFullRenderParseTask?.cancel()
+        deferredFullRenderParseTask = nil
         deferredFullRenderToken &+= 1
+        deferredFullRenderParseToken &+= 1
         largeDocumentLightLayoutWorkItem?.cancel()
         largeDocumentLightLayoutWorkItem = nil
         scrollChromeUpdateWorkItem?.cancel()
@@ -3619,6 +4213,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         }
         let contentRange = NSRange(location: paraRange.location, length: max(0, contentLen))
         guard contentRange.length > 0 else { return }
+        if paragraphContainsHybridExpandedInlineSyntax(storage: storage, range: contentRange) { return }
 
         // Don't convert inside code blocks or tables.
         let kind = effectiveBlockKind(in: storage, paraRange: paraRange, contentRange: contentRange)
@@ -3764,6 +4359,26 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         }
     }
 
+    private func paragraphContainsHybridExpandedInlineSyntax(storage: NSTextStorage, range: NSRange) -> Bool {
+        guard range.location != NSNotFound, range.length > 0, range.location < storage.length else { return false }
+        let clampedLength = min(range.length, storage.length - range.location)
+        guard clampedLength > 0 else { return false }
+
+        var found = false
+        storage.enumerateAttributes(
+            in: NSRange(location: range.location, length: clampedLength),
+            options: []
+        ) { attrs, _, stop in
+            let expandedSyntax = (attrs[.kernHybridExpandedInlineSyntax] as? Bool) ?? false
+            let expandedLink = (attrs[.kernHybridExpandedInlineLink] as? Bool) ?? false
+            if expandedSyntax || expandedLink {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
     private func applyInlineLinkInputRulesIfNeeded(
         storage: NSTextStorage,
         contentRange: NSRange,
@@ -3876,6 +4491,12 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
         let attributedIndent = (storage.attribute(.kernListIndent, at: paraRange.location, effectiveRange: nil) as? Int) ?? 0
         let attributedDepth = (storage.attribute(.kernListDepth, at: paraRange.location, effectiveRange: nil) as? Int) ?? 0
+        let quoteDepth = resolvedQuoteDepth(
+            in: storage,
+            paraRange: paraRange,
+            contentRange: contentRange,
+            fallbackLocation: paraRange.location
+        )
         let indentStep = listIndentStep(for: effectiveKind)
         let syntheticIndent = max(attributedIndent, max(0, attributedDepth) * max(1, indentStep))
         if syntheticIndent > 0 {
@@ -3884,18 +4505,24 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                 markdownLine = String(repeating: " ", count: syntheticIndent - parsedLeading) + markdownLine
             }
         }
-        let parsedIndent = markdownLine.prefix { $0 == " " }.count
+        let listMarkdown = quoteDepth > 0
+            ? strippingMarkdownQuotePrefix(from: markdownLine, expectedDepth: quoteDepth)
+            : markdownLine
+        let parsedIndent = listMarkdown.prefix { $0 == " " }.count
         let listIndent = max(attributedIndent, parsedIndent)
 
         // Notion/ProseMirror-like behavior: Backspace at list item start should first lift/outdent
         // nested items before fully unlisting them.
         if listIndent > 0 || attributedDepth > 0,
            (effectiveKind == .bullet || effectiveKind == .task || effectiveKind == .ordered),
-           let adjusted = adjustedListMarkdownLine(markdownLine, kind: effectiveKind, outdent: true),
-           adjusted != markdownLine {
+           let adjusted = adjustedListMarkdownLine(listMarkdown, kind: effectiveKind, outdent: true),
+           adjusted != listMarkdown {
             let preferredBodyMarkdown = unlistedBodyMarkdown(from: adjusted, kind: effectiveKind)
+            let importedMarkdown = quoteDepth > 0
+                ? markdownQuotePrefix(depth: quoteDepth) + adjusted
+                : adjusted
             let imported = importListMarkdownContentWithContextIfNeeded(
-                adjusted,
+                importedMarkdown,
                 kind: effectiveKind,
                 options: options
             )
@@ -3937,12 +4564,22 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             let body = NSMutableAttributedString(attributedString: storage.attributedSubstring(from: bodyRange))
             clearBlockSemanticsKeepingInline(in: body)
             let bodyMarkdown = NativeMarkdownCodec.exportMarkdown(body, options: options)
-            replacement = NativeMarkdownCodec.importMarkdown(bodyMarkdown, options: options)
+            let importedMarkdown = quoteDepth > 0
+                ? markdownQuotePrefix(depth: quoteDepth) + bodyMarkdown
+                : bodyMarkdown
+            replacement = NativeMarkdownCodec.importMarkdown(importedMarkdown, options: options)
         } else if bodyRange.length > 0 {
             let bodyMarkdown = storage.attributedSubstring(from: bodyRange).string
-            replacement = NativeMarkdownCodec.importMarkdown(bodyMarkdown, options: options)
+            let importedMarkdown = quoteDepth > 0
+                ? markdownQuotePrefix(depth: quoteDepth) + bodyMarkdown
+                : bodyMarkdown
+            replacement = NativeMarkdownCodec.importMarkdown(importedMarkdown, options: options)
         } else {
-            replacement = NSAttributedString()
+            if quoteDepth > 0 {
+                replacement = NativeMarkdownCodec.importMarkdown(markdownQuotePrefix(depth: quoteDepth), options: options)
+            } else {
+                replacement = NSAttributedString()
+            }
         }
 
         isApplyingInputRules = true
@@ -4627,8 +5264,12 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let prevContentRange = paragraphContentRange(ns: ns, paraRange: prevPara)
         let prevKind = effectiveBlockKind(in: storage, paraRange: prevPara, contentRange: prevContentRange)
         let prevAttrLocation = semanticAttributeProbeLocation(in: storage, paraRange: prevPara, contentRange: prevContentRange)
-        let prevQuoteDepth = (storage.attribute(.kernQuoteDepth, at: prevAttrLocation, effectiveRange: nil) as? Int) ?? 0
-
+        let prevQuoteDepth = resolvedQuoteDepth(
+            in: storage,
+            paraRange: prevPara,
+            contentRange: prevContentRange,
+            fallbackLocation: prevAttrLocation
+        )
         let currPara = ns.paragraphRange(for: NSRange(location: caret, length: 0))
         let currContentRange = paragraphContentRange(ns: ns, paraRange: currPara)
 
@@ -4666,6 +5307,11 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                 isApplyingAutoNewline = true
                 defer { isApplyingAutoNewline = false }
 
+                let carriedQuoteDepth = max(
+                    prevQuoteDepth,
+                    max(0, textView.typingAttributes[.kernQuoteDepth] as? Int ?? 0)
+                )
+
                 // Remove the marker-only list item above and turn it into an empty paragraph.
                 let removed = removeMarkerPrefix(in: prevPara, storage: storage, ns: ns)
                 // Deleting characters above the caret shifts the caret left.
@@ -4673,7 +5319,11 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                 textView.setSelectedRange(NSRange(location: newCaret, length: 0))
                 clearListBlockSemanticsAroundCaret(newCaret, storage: storage)
 
-                setBaseTypingAttributes()
+                if carriedQuoteDepth > 0 {
+                    setQuoteTypingAttributes(depth: carriedQuoteDepth)
+                } else {
+                    setBaseTypingAttributes()
+                }
                 return
             }
 
@@ -4702,7 +5352,10 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             }
 
             let opt = NativeMarkdownCodec.Options.fromUserDefaults()
-            let imported = NativeMarkdownCodec.importMarkdown(markerLine, options: opt)
+            let importedMarkdown = prevQuoteDepth > 0
+                ? markdownQuotePrefix(depth: prevQuoteDepth) + markerLine
+                : markerLine
+            let imported = NativeMarkdownCodec.importMarkdown(importedMarkdown, options: opt)
 
             if currContentRange.length == 0 {
                 storage.replaceCharacters(in: currContentRange, with: imported)
@@ -4863,7 +5516,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                     if (attrs[.kernMarker] as? Bool) == true
                         || attrs[.kernBlockKind] != nil
                         || attrs[.kernListIndent] != nil
-                        || attrs[.kernOrderedIndex] != nil {
+                        || attrs[.kernOrderedIndex] != nil
+                        || attrs[.kernQuoteDepth] != nil {
                         probe = range.location
                         stop.pointee = true
                     }
@@ -4876,6 +5530,37 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         }
 
         return min(max(0, paraRange.location), max(0, storage.length - 1))
+    }
+
+    private func resolvedQuoteDepth(
+        in storage: NSTextStorage,
+        paraRange: NSRange,
+        contentRange: NSRange,
+        fallbackLocation: Int
+    ) -> Int {
+        guard storage.length > 0 else { return 0 }
+
+        let candidateRanges: [NSRange] = [contentRange, paraRange]
+        var maxDepth = 0
+
+        for range in candidateRanges where range.length > 0 {
+            guard range.location < storage.length else { continue }
+            let clampedLength = min(range.length, storage.length - range.location)
+            guard clampedLength > 0 else { continue }
+            let clamped = NSRange(location: range.location, length: clampedLength)
+            storage.enumerateAttribute(.kernQuoteDepth, in: clamped, options: []) { value, _, _ in
+                let depth = max(0, value as? Int ?? 0)
+                if depth > maxDepth {
+                    maxDepth = depth
+                }
+            }
+            if maxDepth > 0 {
+                return maxDepth
+            }
+        }
+
+        let safeFallback = min(max(0, fallbackLocation), max(0, storage.length - 1))
+        return max(0, (storage.attribute(.kernQuoteDepth, at: safeFallback, effectiveRange: nil) as? Int) ?? 0)
     }
 
     private func looksLikeGfmTableRow(_ line: String) -> Bool {
@@ -4969,7 +5654,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         var len = 0
         while len < attributed.length {
             let isMarker = (attributed.attribute(.kernMarker, at: len, effectiveRange: nil) as? Bool) ?? false
-            if !isMarker { break }
+            let isCheckbox = (attributed.attribute(.kernCheckbox, at: len, effectiveRange: nil) as? Bool) ?? false
+            if !(isMarker || isCheckbox) { break }
             len += 1
         }
         return len
@@ -4981,7 +5667,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         while len < contentRange.length {
             let idx = contentRange.location + len
             let isMarker = (storage.attribute(.kernMarker, at: idx, effectiveRange: nil) as? Bool) ?? false
-            if !isMarker { break }
+            let isCheckbox = (storage.attribute(.kernCheckbox, at: idx, effectiveRange: nil) as? Bool) ?? false
+            if !(isMarker || isCheckbox) { break }
             len += 1
         }
         return len
@@ -5027,6 +5714,30 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             .foregroundColor: NativeEditorAppearance.primaryTextColor(),
             .paragraphStyle: style,
         ]
+    }
+
+    private func markdownQuotePrefix(depth: Int) -> String {
+        String(repeating: "> ", count: max(1, depth))
+    }
+
+    private func strippingMarkdownQuotePrefix(from markdownLine: String, expectedDepth: Int) -> String {
+        guard expectedDepth > 0 else { return markdownLine }
+        var rest = markdownLine[markdownLine.startIndex...]
+        var removed = 0
+
+        while removed < expectedDepth {
+            while let first = rest.first, first == " " {
+                rest = rest.dropFirst()
+            }
+            guard let first = rest.first, first == ">" else { break }
+            rest = rest.dropFirst()
+            if let next = rest.first, next == " " {
+                rest = rest.dropFirst()
+            }
+            removed += 1
+        }
+
+        return String(rest)
     }
 
     private func setQuoteTypingAttributes(depth: Int) {
@@ -5835,42 +6546,17 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                 return
             }
             let parseStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let parseResult: StagedPromotionParseResultBox = await MainActor.run {
-                let prelude: (Int, Bool) = {
-                    if let cachedStart = cachedContextBoundaryStartUTF16,
-                       let cachedDisplayStart = cachedContextBoundaryDisplayStart,
-                       let cachedRenderedUTF16 = cachedContextBoundaryRenderedUTF16,
-                       cachedStart == computed.contextStartUTF16,
-                       cachedRenderedUTF16 == currentRenderedUTF16 {
-                        let candidate = currentRenderedDisplayBoundary - cachedDisplayStart
-                        if candidate >= 0 {
-                            return (candidate, true)
-                        }
-                    }
-
-                    var lengthOnlyOptions = parseOptions
-                    lengthOnlyOptions.syntaxHighlightingEnabled = false
-                    let oldAttributed = NativeMarkdownCodec.importMarkdown(
-                        computed.contextOldMarkdown,
-                        options: lengthOnlyOptions,
-                        baseURL: baseURLAtLaunch,
-                        precomputedReferenceDefinitions: referenceDefinitionsAtLaunch
-                    )
-                    return (oldAttributed.length, false)
-                }()
-
-                let newAttributed = NativeMarkdownCodec.importMarkdown(
-                    computed.contextNewMarkdown,
-                    options: parseOptions,
-                    baseURL: baseURLAtLaunch,
-                    precomputedReferenceDefinitions: referenceDefinitionsAtLaunch
-                )
-                return StagedPromotionParseResultBox(
-                    preludeDisplayLength: prelude.0,
-                    contextNewAttributed: newAttributed,
-                    preludeCacheHit: prelude.1
-                )
-            }
+            let parseResult = await computeWorker.parsePromotionContext(
+                computed: computed,
+                parseOptions: parseOptions,
+                baseURL: baseURLAtLaunch,
+                referenceDefinitions: referenceDefinitionsAtLaunch,
+                cachedContextBoundaryStartUTF16: cachedContextBoundaryStartUTF16,
+                cachedContextBoundaryDisplayStart: cachedContextBoundaryDisplayStart,
+                cachedContextBoundaryRenderedUTF16: cachedContextBoundaryRenderedUTF16,
+                currentRenderedUTF16: currentRenderedUTF16,
+                currentRenderedDisplayBoundary: currentRenderedDisplayBoundary
+            )
             let parseMs = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - parseStart) / 1_000_000
             guard !Task.isCancelled else {
                 await MainActor.run {
@@ -5898,6 +6584,14 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                     contextStartUTF16: computed.contextStartUTF16,
                     preludeDisplayLength: parseResult.preludeDisplayLength,
                     contextNewAttributed: parseResult.contextNewAttributed,
+                    preludeOldContextUTF16Count: parseResult.preludeOldContextUTF16Count,
+                    preludeImportMs: parseResult.preludeImportMs,
+                    zeroOverlapFastPathEligible: parseResult.zeroOverlapFastPathEligible,
+                    contextOverlapUTF16Count: parseResult.contextOverlapUTF16Count,
+                    contextWindowUTF16Count: parseResult.contextWindowUTF16Count,
+                    requiredMainActorImport: parseResult.requiredMainActorImport,
+                    importPhaseDurationsMs: parseResult.importPhaseDurationsMs,
+                    importPhaseCounts: parseResult.importPhaseCounts,
                     promotionComputeMs: computeMs,
                     promotionParseMs: parseMs
                 )
@@ -5917,6 +6611,14 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         contextStartUTF16: Int,
         preludeDisplayLength: Int,
         contextNewAttributed: NSAttributedString,
+        preludeOldContextUTF16Count: Int,
+        preludeImportMs: Double,
+        zeroOverlapFastPathEligible: Bool,
+        contextOverlapUTF16Count: Int,
+        contextWindowUTF16Count: Int,
+        requiredMainActorImport: Bool,
+        importPhaseDurationsMs: [String: Double],
+        importPhaseCounts: [String: Int],
         promotionComputeMs: Double,
         promotionParseMs: Double
     ) {
@@ -6048,6 +6750,18 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             "wow_staged_promotion_apply_latency_ms_total",
             by: promotionApplyMs
         )
+        recordStagedPromotionContextMetrics(
+            preludeOldContextUTF16Count: preludeOldContextUTF16Count,
+            preludeImportMs: preludeImportMs,
+            zeroOverlapFastPathEligible: zeroOverlapFastPathEligible,
+            contextOverlapUTF16Count: contextOverlapUTF16Count,
+            contextWindowUTF16Count: contextWindowUTF16Count,
+            requiredMainActorImport: requiredMainActorImport
+        )
+        recordStagedPromotionImportPhaseMetrics(
+            phaseDurationsMs: importPhaseDurationsMs,
+            phaseCounts: importPhaseCounts
+        )
         WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_apply_count")
         if promotionApplyMs > 16 {
             WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_apply_over_16ms_count")
@@ -6064,7 +6778,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         tuneAdaptiveStagedPromotionBudget(
             lastApplyMs: promotionApplyMs,
             lastParseMs: promotionParseMs,
-            useTurbo: useTurbo
+            useTurbo: useTurbo,
+            requiredMainActorImport: requiredMainActorImport
         )
 
         stagedRenderedMarkdownUTF16Count = promotedPrefixUTF16Count
@@ -6081,6 +6796,124 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
         updateCodeBlockChrome()
         scheduleStagedPromotionFollowupIfNeeded()
+    }
+
+    private func recordStagedPromotionContextMetrics(
+        preludeOldContextUTF16Count: Int,
+        preludeImportMs: Double,
+        zeroOverlapFastPathEligible: Bool,
+        contextOverlapUTF16Count: Int,
+        contextWindowUTF16Count: Int,
+        requiredMainActorImport: Bool
+    ) {
+        let preludeOldContext = Double(max(0, preludeOldContextUTF16Count))
+        WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+            "wow_staged_promotion_prelude_old_context_utf16_max",
+            candidate: preludeOldContext
+        )
+        WowInternalMetricsRecorder.shared.recordAuxSample(
+            "wow_staged_promotion_prelude_old_context_utf16",
+            sample: preludeOldContext
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            "wow_staged_promotion_prelude_old_context_utf16_total",
+            by: preludeOldContext
+        )
+
+        WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+            "wow_staged_promotion_prelude_import_latency_ms_max",
+            candidate: preludeImportMs
+        )
+        WowInternalMetricsRecorder.shared.recordAuxSample(
+            "wow_staged_promotion_prelude_import_latency_ms",
+            sample: preludeImportMs
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            "wow_staged_promotion_prelude_import_latency_ms_total",
+            by: preludeImportMs
+        )
+        if zeroOverlapFastPathEligible {
+            WowInternalMetricsRecorder.shared.incrementAuxCounter(
+                "wow_staged_promotion_zero_overlap_fast_path_eligible_count"
+            )
+        }
+
+        let overlap = Double(max(0, contextOverlapUTF16Count))
+        WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+            "wow_staged_promotion_context_overlap_utf16_max",
+            candidate: overlap
+        )
+        WowInternalMetricsRecorder.shared.recordAuxSample(
+            "wow_staged_promotion_context_overlap_utf16",
+            sample: overlap
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            "wow_staged_promotion_context_overlap_utf16_total",
+            by: overlap
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            contextOverlapUTF16Count == 0
+                ? "wow_staged_promotion_context_overlap_zero_count"
+                : "wow_staged_promotion_context_overlap_nonzero_count"
+        )
+
+        let window = Double(max(0, contextWindowUTF16Count))
+        WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+            "wow_staged_promotion_context_window_utf16_max",
+            candidate: window
+        )
+        WowInternalMetricsRecorder.shared.recordAuxSample(
+            "wow_staged_promotion_context_window_utf16",
+            sample: window
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            "wow_staged_promotion_context_window_utf16_total",
+            by: window
+        )
+        WowInternalMetricsRecorder.shared.incrementAuxCounter(
+            requiredMainActorImport
+                ? "wow_staged_promotion_main_actor_required_count"
+                : "wow_staged_promotion_off_main_import_count"
+        )
+    }
+
+    private func recordStagedPromotionImportPhaseMetrics(
+        phaseDurationsMs: [String: Double],
+        phaseCounts: [String: Int]
+    ) {
+        guard !phaseDurationsMs.isEmpty || !phaseCounts.isEmpty else { return }
+
+        let durationKeys = phaseDurationsMs.keys.sorted()
+        for phase in durationKeys {
+            let safePhase = phase.replacingOccurrences(of: ".", with: "_")
+            let duration = max(0, phaseDurationsMs[phase] ?? 0)
+            WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+                "wow_staged_promotion_import_phase_\(safePhase)_latency_ms_max",
+                candidate: duration
+            )
+            WowInternalMetricsRecorder.shared.recordAuxSample(
+                "wow_staged_promotion_import_phase_\(safePhase)_latency_ms",
+                sample: duration
+            )
+            WowInternalMetricsRecorder.shared.incrementAuxCounter(
+                "wow_staged_promotion_import_phase_\(safePhase)_latency_ms_total",
+                by: duration
+            )
+        }
+
+        let countKeys = phaseCounts.keys.sorted()
+        for phase in countKeys {
+            let safePhase = phase.replacingOccurrences(of: ".", with: "_")
+            let count = Double(max(0, phaseCounts[phase] ?? 0))
+            WowInternalMetricsRecorder.shared.recordMaxAuxMetric(
+                "wow_staged_promotion_import_phase_\(safePhase)_count_max",
+                candidate: count
+            )
+            WowInternalMetricsRecorder.shared.incrementAuxCounter(
+                "wow_staged_promotion_import_phase_\(safePhase)_count_total",
+                by: count
+            )
+        }
     }
 
     private func cancelStagedPromotionInFlightIfMatching(token: UInt64) {
@@ -6349,7 +7182,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let maxChars = useTurbo ? stagedPromotionTurboViewportMicroStepMaxChars : stagedPromotionViewportMicroStepMaxChars
         let baseline = max(
             stagedPromotionViewportMicroStepMinChars,
-            min(stagedAdaptiveViewportMicroStepChars, maxChars)
+            min(stagedAdaptiveBudget.microStepChars, maxChars)
         )
         guard
             let sinceInteraction,
@@ -6371,6 +7204,14 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if useTurbo, sinceInteraction > 2.5, sinceScroll > 2.5 {
             // Fully idle catch-up mode: allow larger slices only when the user has been
             // inactive for a sustained interval, so full-fidelity completion does not drag.
+            // But only re-enable the turbo boost after multiple cheap parse/apply windows;
+            // otherwise one lucky slice can regrow back into the same parse-heavy tail.
+            if stagedAdaptiveBudget.idleBoostSuppressed {
+                WowInternalMetricsRecorder.shared.incrementAuxCounter(
+                    "wow_staged_promotion_micro_cap_idle_boost_suppressed_count"
+                )
+                return baseline
+            }
             let idleBoosted = min(maxChars, max(baseline, Int(Double(baseline) * 1.35)))
             WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_micro_cap_idle_boost_count")
             return idleBoosted
@@ -6406,57 +7247,50 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     }
 
     private func resetAdaptiveStagedPromotionBudget() {
-        stagedAdaptiveViewportMicroStepChars = stagedPromotionViewportMicroStepChars
+        stagedAdaptiveBudget.reset()
     }
 
-    private func tuneAdaptiveStagedPromotionBudget(lastApplyMs: Double, lastParseMs: Double, useTurbo: Bool) {
+    private func tuneAdaptiveStagedPromotionBudget(
+        lastApplyMs: Double,
+        lastParseMs: Double,
+        useTurbo: Bool,
+        requiredMainActorImport: Bool
+    ) {
         guard stagedPromotionsAllowed else { return }
-        let frameBudgetMs = stagedPromotionFrameBudgetMsValue()
-        let overHardApplyBudget: Bool
-        let overSoftApplyBudget: Bool
-        let overHardParseBudget: Bool
-        let overSoftParseBudget: Bool
-        let growthApplyThreshold: Double
-        let growthParseThreshold: Double
-        let growthMultiplier: Double
-        if useTurbo {
-            // In turbo mode we are intentionally catching up large unseen regions.
-            // Allow larger slices before backing off so full-fidelity completion does not stall.
-            overHardApplyBudget = lastApplyMs > max(42.0, frameBudgetMs * 10.0)
-            overSoftApplyBudget = lastApplyMs > max(24.0, frameBudgetMs * 6.0)
-            overHardParseBudget = lastParseMs > 300.0
-            overSoftParseBudget = lastParseMs > 180.0
-            growthApplyThreshold = max(12.0, frameBudgetMs * 3.0)
-            growthParseThreshold = 120.0
-            growthMultiplier = 1.08
-        } else {
-            overHardApplyBudget = lastApplyMs > max(16.0, frameBudgetMs * 4.0)
-            overSoftApplyBudget = lastApplyMs > max(8.0, frameBudgetMs * 2.0)
-            overHardParseBudget = lastParseMs > 200.0
-            overSoftParseBudget = lastParseMs > 120.0
-            growthApplyThreshold = max(2.0, frameBudgetMs * 0.65)
-            growthParseThreshold = 80.0
-            growthMultiplier = 1.12
-        }
-        let floorChars = stagedPromotionViewportMicroStepMinChars
-        var next = stagedAdaptiveViewportMicroStepChars
-        if overHardParseBudget {
-            next = Int(Double(next) * 0.72)
-        } else if overHardApplyBudget || lastApplyMs > 50 {
-            next = Int(Double(next) * 0.8)
-        } else if overSoftParseBudget {
-            next = Int(Double(next) * 0.84)
-        } else if overSoftApplyBudget {
-            next = Int(Double(next) * 0.9)
-        } else if lastApplyMs < growthApplyThreshold, lastParseMs < growthParseThreshold {
-            next = Int(Double(next) * growthMultiplier)
-        } else {
-            return
-        }
-        let maxChars = useTurbo ? stagedPromotionTurboViewportMicroStepMaxChars : stagedPromotionViewportMicroStepMaxChars
-        stagedAdaptiveViewportMicroStepChars = max(
-            max(stagedPromotionViewportMicroStepMinChars, floorChars),
-            min(next, maxChars)
+        let snapshot = stagedAdaptiveBudget.tune(
+            lastApplyMs: lastApplyMs,
+            lastParseMs: lastParseMs,
+            useTurbo: useTurbo,
+            frameBudgetMs: stagedPromotionFrameBudgetMsValue(),
+            requiredMainActorImport: requiredMainActorImport
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_rolling_parse_p95_ms",
+            value: snapshot.rollingParseP95Ms
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_rolling_parse_p50_ms",
+            value: snapshot.rollingParseP50Ms
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_rolling_apply_p95_ms",
+            value: snapshot.rollingApplyP95Ms
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_rolling_apply_p50_ms",
+            value: snapshot.rollingApplyP50Ms
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_adaptive_micro_step_utf16",
+            value: Double(snapshot.microStepChars)
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_adaptive_stable_window_count",
+            value: Double(snapshot.stableLowPressureStreak)
+        )
+        WowInternalMetricsRecorder.shared.recordAuxMetric(
+            "wow_staged_promotion_idle_boost_suppressed",
+            value: snapshot.idleBoostSuppressed ? 1 : 0
         )
     }
 
@@ -6564,7 +7398,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             sinceInteraction: sinceInteraction,
             sinceScroll: sinceScroll
         )
-        var followupDelayMs = max(4, delayOverrideMs ?? stagedPromotionFollowupDelayMsValue(useTurbo: useTurbo))
+        var followupDelayMs = max(2, delayOverrideMs ?? stagedPromotionFollowupDelayMsValue(useTurbo: useTurbo))
         if sinceScroll < 0.35 {
             followupDelayMs = max(followupDelayMs, 60)
         }
@@ -6915,7 +7749,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         // Compute in the container coordinate space to avoid flipped-origin confusion.
         let bgRectInContainer = view.convert(bgRect, from: textView)
         let x = bgRectInContainer.maxX - CodeBlockChromeGeometry.chromeOverlayInsetX - chromeSize.width
-        let y = bgRectInContainer.maxY + CodeBlockChromeGeometry.chromeOverlayTopOverflow - chromeSize.height
+        let y = bgRectInContainer.maxY - CodeBlockChromeGeometry.chromeOverlayInsetY - chromeSize.height
 
         // Clamp to keep chrome visible even if the code block background is unusually narrow.
         let clampedX = max(0, min(x, view.bounds.width - chromeSize.width))

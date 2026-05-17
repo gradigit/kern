@@ -19,12 +19,13 @@ Scope: Close all currently known full-spec gaps in KernTextKit (native AppKit/Te
     - Build log: `test-results/native-editor/build-20260217-034316.log`
     - Built app: `.derived-data/tests/Build/Products/Debug/KernTextKit.app`
 
-- [~] Exhaustive UI typing behavior matrix expanded to include real key-driven newline/list/task scenarios.
+- [x] Exhaustive typing behavior coverage moved to unit-driven matrix/program/stateful gates.
   - Implementation:
-    - `KernUITests/NativeEditorE2ETests.swift`
-    - `testScenarioMatrix_ExhaustiveUI_TypingBehaviorMatrix`
+    - `KernTests/NativeEditorTypingBehaviorMatrixCoverageTests.swift`
+    - `KernTests/NativeEditorNotionTypingBehaviorProgramTests.swift`
+    - `KernTests/NativeEditorTypingStatefulSequenceTests.swift`
   - Status:
-    - Added and wired; currently being stabilized against save-timing/per-scenario determinism.
+    - XCUI runner was removed; exhaustive typing coverage now lives in the PR/nightly typing-behavior lanes plus targeted AppKit interaction tests.
 
 ## 1) Current Gap Inventory (from latest exhaustive run)
 
@@ -202,7 +203,7 @@ Phase 3 (Highlight expansion):
 3. Tier 2 languages.
 
 Phase 4 (Hardening):
-1. Full exhaustive run (unit + snapshots + UI).
+1. Full exhaustive run (unit + snapshots + orchestrated exhaustive gate).
 2. Perf run on stress + mega fixtures.
 3. Fix regressions and re-run until green.
 
@@ -218,7 +219,7 @@ Phase 4 (Hardening):
   - exhaustive orchestration (`scripts/run-exhaustive-native-suite.sh`) is green (fixture generation + smoke + exhaustive + perf)
   - perf suite runs with bounded defaults for mega/ultimate typing and render/scroll workloads
   - heavy ultimate-render perf is explicit opt-in (`KERN_PERF_ENABLE_ULTIMATE_RENDER=1` or `KERN_PERF_RENDER_FULL=1`)
-  - exhaustive UI remains host-permission-gated (runs only when Accessibility trust is granted to Xcode + UI runner)
+  - active exhaustive gates are unit/snapshot/orchestrated only; no XCUI runner remains in the release-hardening path
 
 ## 5) Test Gates Per Phase
 
@@ -240,9 +241,8 @@ Phase 3 gate:
 Final gate:
 - `./scripts/test-native-editor.sh --unit-only --exhaustive`
 - `./scripts/test-native-editor.sh --unit-only --snapshots --exhaustive`
-- `./scripts/test-native-editor.sh --ui-only --exhaustive` (when host permissions available)
 - `./scripts/bench-native-editor.sh`
-- `./scripts/run-exhaustive-native-suite.sh` (recommended orchestrated gate; UI step can be enabled with `KERN_RUN_UI_EXHAUSTIVE=1`)
+- `./scripts/run-exhaustive-native-suite.sh` (recommended orchestrated gate)
 
 ## 6) Non-Negotiable Quality Rules
 
@@ -251,5 +251,5 @@ Final gate:
 - Any new feature must ship with:
   - unit codec tests
   - snapshot/layout metric checks
-  - UI tests when interaction-specific
+  - unit-driven interaction tests when interaction-specific
 - No “green by skipping”: exhaustive failures must only disappear when feature behavior is implemented.

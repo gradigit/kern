@@ -41,6 +41,7 @@ final class NativeEditorLinkInteractionTests: XCTestCase {
     func testFileLinkUsesOpenHandler() {
         let vc = NativeEditorViewController()
         _ = vc.view
+        vc.documentURL = URL(fileURLWithPath: "/tmp/kern/docs/current.md")
 
         var opened: URL?
         vc.openExternalURLHandler = { url in
@@ -48,7 +49,7 @@ final class NativeEditorLinkInteractionTests: XCTestCase {
             return true
         }
 
-        let url = URL(fileURLWithPath: "/tmp/kern-image.png")
+        let url = URL(fileURLWithPath: "/tmp/kern/docs/assets/kern-image.png")
         let handled = vc.textView(NSTextView(), clickedOnLink: url, at: 0)
         XCTAssertTrue(handled)
         XCTAssertEqual(opened, url)
@@ -104,19 +105,62 @@ final class NativeEditorLinkInteractionTests: XCTestCase {
     }
 
     @MainActor
-    func testRootPathLinkResolvesToFileURL() {
+    func testAbsoluteRootPathLinkIsRejected() {
         let vc = NativeEditorViewController()
         _ = vc.view
 
-        var opened: URL?
         vc.openExternalURLHandler = { url in
-            opened = url
-            return true
+            XCTFail("openExternalURLHandler should not be called for rejected absolute local paths: \(url)")
+            return false
         }
 
         let handled = vc.textView(NSTextView(), clickedOnLink: URL(string: "/tmp/kern/root.md")!, at: 0)
-        XCTAssertTrue(handled)
-        XCTAssertEqual(opened?.standardizedFileURL.path, "/tmp/kern/root.md")
+        XCTAssertFalse(handled)
+    }
+
+    @MainActor
+    func testTildePathLinkIsRejected() {
+        let vc = NativeEditorViewController()
+        _ = vc.view
+
+        vc.openExternalURLHandler = { url in
+            XCTFail("openExternalURLHandler should not be called for rejected tilde local paths: \(url)")
+            return false
+        }
+
+        let handled = vc.textView(NSTextView(), clickedOnLink: URL(string: "~/kern/root.md")!, at: 0)
+        XCTAssertFalse(handled)
+    }
+
+    @MainActor
+    func testFileLinkOutsideDocumentRootIsRejected() {
+        let vc = NativeEditorViewController()
+        _ = vc.view
+        vc.documentURL = URL(fileURLWithPath: "/tmp/kern/docs/current.md")
+
+        vc.openExternalURLHandler = { url in
+            XCTFail("openExternalURLHandler should not be called for out-of-root file URLs: \(url)")
+            return false
+        }
+
+        let url = URL(fileURLWithPath: "/tmp/other/location/outside.md")
+        let handled = vc.textView(NSTextView(), clickedOnLink: url, at: 0)
+        XCTAssertFalse(handled)
+    }
+
+    @MainActor
+    func testRelativeTraversalLinkOutsideDocumentRootIsRejected() {
+        let vc = NativeEditorViewController()
+        _ = vc.view
+        vc.documentURL = URL(fileURLWithPath: "/tmp/kern/docs/current.md")
+
+        vc.openExternalURLHandler = { url in
+            XCTFail("openExternalURLHandler should not be called for traversal links escaping the document root: \(url)")
+            return false
+        }
+
+        let handled = vc.textView(NSTextView(), clickedOnLink: URL(string: "../secrets.md")!, at: 0)
+        XCTAssertFalse(handled)
     }
 
     @MainActor

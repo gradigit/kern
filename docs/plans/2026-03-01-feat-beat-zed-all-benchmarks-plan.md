@@ -157,7 +157,7 @@ Files:
 - [x] `benchmark_open_ready` official run after changes
 - [x] `benchmark_full_fidelity` official run after changes
 - [x] Release-app profile benchmark verification
-- [x] Rebuilt Release app and reinstalled `/Users/aaaaa/Applications/Kern.app`
+- [x] Rebuilt Release app and reinstalled the local Applications copy of Kern
 - [ ] 30-run final sign-off package (pending)
 - [ ] Variance gate passing across repeated full-fidelity official runs (pending)
 

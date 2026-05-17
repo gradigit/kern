@@ -539,6 +539,7 @@ final class NativeEditorNotionListBehaviorRegressionTests: XCTestCase {
             saved[key] = defaults.object(forKey: key)
             defaults.set(value, forKey: key)
         }
+        NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
         defer {
             for (key, previous) in saved {
                 if let previous {

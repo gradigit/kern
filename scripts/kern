@@ -11,7 +11,7 @@ Usage:
   scripts/kern quick-open <query> [directory]
 
 Environment:
-  KERN_APP_PATH   Absolute app bundle path (default: ~/Applications/Kern.app)
+  KERN_APP_PATH   Absolute app bundle path (default: probe Kern.app, then KernTextKit.app)
 
 Examples:
   scripts/kern open test-fixtures/native-editor-benchmark.md
@@ -44,19 +44,20 @@ kern_app_path() {
     return
   fi
 
-  local user_app
-  user_app="$(resolve_abs_path "~/Applications/Kern.app")"
-  if [[ -d "$user_app" ]]; then
-    printf '%s\n' "$user_app"
-    return
-  fi
-
-  local system_app
-  system_app="/Applications/Kern.app"
-  if [[ -d "$system_app" ]]; then
-    printf '%s\n' "$system_app"
-    return
-  fi
+  local candidate
+  for candidate in \
+    "~/Applications/Kern.app" \
+    "/Applications/Kern.app" \
+    "~/Applications/KernTextKit.app" \
+    "/Applications/KernTextKit.app"
+  do
+    local resolved
+    resolved="$(resolve_abs_path "$candidate")"
+    if [[ -d "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return
+    fi
+  done
 
   # Fallback to bundle identifier open behavior.
   printf '%s\n' ""
@@ -69,7 +70,7 @@ open_in_kern() {
   if [[ -n "$app" ]]; then
     open -a "$app" "$target"
   else
-    open -b com.kerntextkit.KernTextKit "$target"
+    open -b com.gradigit.kern "$target"
   fi
 }
 

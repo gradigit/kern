@@ -281,4 +281,21 @@ final class NativeMarkdownCodecFutureSpecTests: XCTestCase {
         XCTAssertNotNil(remoteAttachment)
         XCTAssertEqual(remoteAttachment?.allowsRemoteLoading, false)
     }
+
+    @MainActor
+    func testRelativeImageWithoutBaseURLStaysUnresolved() {
+        let imported = NativeMarkdownCodec.importMarkdown("![local](assets/pixel.png)")
+
+        var attachment: MarkdownImageAttachment?
+        imported.enumerateAttribute(.attachment, in: NSRange(location: 0, length: imported.length), options: []) { value, _, stop in
+            if let image = value as? MarkdownImageAttachment {
+                attachment = image
+                stop.pointee = true
+            }
+        }
+
+        XCTAssertNotNil(attachment)
+        XCTAssertNil(attachment?.resolvedURL, "Relative image paths without a document base URL should remain unresolved instead of resolving against the process cwd")
+        XCTAssertEqual(attachment?.loadState, .failed)
+    }
 }

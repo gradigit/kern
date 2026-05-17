@@ -416,6 +416,42 @@ final class NativeEditorInitialViewportTests: XCTestCase {
     }
 
     @MainActor
+    func testBenchmarkFixtureStagedOpenEmitsFullDocumentFidelityMetricWithinBenchmarkWindow() throws {
+        guard TestRuntimeConfig.bool("KERN_ENABLE_PERF_TESTS")
+            || TestRuntimeConfig.bool("KERN_ENABLE_BENCHMARK_FIDELITY_TESTS") else {
+            throw XCTSkip("Set KERN_ENABLE_BENCHMARK_FIDELITY_TESTS=1 (or KERN_ENABLE_PERF_TESTS=1) to run benchmark fidelity timing checks")
+        }
+
+        let metricsPath = uniqueTempWowMetricsPath()
+        defer { try? FileManager.default.removeItem(atPath: metricsPath) }
+        let markdown = try loadPerfFixture(name: "native-editor-benchmark.md")
+
+        withTemporaryEnvironment([
+            "KERN_FORCE_STAGED_OPEN": "1",
+            "KERN_FORCE_FULL_MARKDOWN_IMPORT": nil,
+            "KERN_WOW_INTERNAL_METRICS_PATH": metricsPath,
+        ]) {
+            let vc = NativeEditorViewController()
+            _ = vc.view
+
+            vc.stringValue = markdown
+            vc.view.layoutSubtreeIfNeeded()
+
+            let deadline = Date().addingTimeInterval(16.0)
+            var fullReady: Double?
+            while Date() < deadline {
+                fullReady = Self.loadWowMetrics(at: metricsPath)?["wow_full_document_fidelity_ready_latency_ms"]
+                if fullReady != nil {
+                    break
+                }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+
+            XCTAssertNotNil(fullReady, "Benchmark fixture should emit full-document fidelity readiness within the benchmark window")
+        }
+    }
+
+    @MainActor
     func testFarScrollPromotionCatchesUpViewportWithoutWaitingForDeferredFullRender() {
         let envKeys = [
             "KERN_FORCE_STAGED_OPEN",
@@ -805,6 +841,11 @@ final class NativeEditorInitialViewportTests: XCTestCase {
             let jumpMax = metrics["scroll_jump_max_px"] ?? 0
             let anchorRebaseCount = metrics["anchor_rebase_count"] ?? 0
             let anchorRebaseFailCount = metrics["anchor_rebase_fail_count"] ?? 0
+            let overlapZeroCount = metrics["wow_staged_promotion_context_overlap_zero_count"] ?? 0
+            let overlapNonZeroCount = metrics["wow_staged_promotion_context_overlap_nonzero_count"] ?? 0
+            let contextWindowUTF16Total = metrics["wow_staged_promotion_context_window_utf16_total"] ?? 0
+            let mainActorRequiredCount = metrics["wow_staged_promotion_main_actor_required_count"] ?? 0
+            let offMainImportCount = metrics["wow_staged_promotion_off_main_import_count"] ?? 0
 
             XCTAssertGreaterThan(applyCount, 0, "Expected at least one staged promotion apply")
             XCTAssertEqual(over100, 0, "No staged promotion apply should exceed 100ms")
@@ -820,6 +861,21 @@ final class NativeEditorInitialViewportTests: XCTestCase {
             XCTAssertLessThanOrEqual(jumpMax, 120, "Scroll jump max should stay bounded")
             XCTAssertGreaterThanOrEqual(anchorRebaseCount, 0)
             XCTAssertEqual(anchorRebaseFailCount, 0, "Anchor remap should not fail")
+            XCTAssertEqual(
+                overlapZeroCount + overlapNonZeroCount,
+                applyCount,
+                "Each applied staged-promotion slice should publish one overlap classification"
+            )
+            XCTAssertEqual(
+                mainActorRequiredCount + offMainImportCount,
+                applyCount,
+                "Each applied staged-promotion slice should publish one import-thread classification"
+            )
+            XCTAssertGreaterThan(
+                contextWindowUTF16Total,
+                0,
+                "Staged-promotion metrics should record parsed context-window UTF-16 totals"
+            )
         }
     }
 
@@ -1073,6 +1129,124 @@ final class NativeEditorInitialViewportTests: XCTestCase {
                 "Full-document fidelity metric should eventually emit after live scroll ends"
             )
         }
+    }
+
+    func testAdaptiveBudgetSuppressesTurboIdleBoostAfterRollingParsePressure() {
+        var controller = StagedPromotionAdaptiveBudgetController(
+            resetMicroStepChars: 448_000,
+            minMicroStepChars: 128_000,
+            normalMaxMicroStepChars: 2_400_000,
+            turboMaxMicroStepChars: 640_000
+        )
+
+        XCTAssertFalse(controller.idleBoostSuppressed)
+
+        for _ in 0..<4 {
+            _ = controller.tune(
+                lastApplyMs: 2.0,
+                lastParseMs: 600.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0
+            )
+        }
+
+        XCTAssertTrue(controller.idleBoostSuppressed, "Sustained high parse pressure should suppress turbo idle boost")
+        XCTAssertLessThan(controller.microStepChars, 448_000, "High parse pressure should shrink the adaptive slice cap")
+    }
+
+    func testProductionViewportMicroStepDefaultsRemainUserFacing() {
+        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionViewportMicroStepChars, 448_000)
+        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionTurboViewportMicroStepMaxChars, 640_000)
+    }
+
+    func testAdaptiveBudgetRequiresStableCheapWindowBeforeTurboIdleBoostReturns() {
+        var controller = StagedPromotionAdaptiveBudgetController(
+            resetMicroStepChars: 448_000,
+            minMicroStepChars: 128_000,
+            normalMaxMicroStepChars: 2_400_000,
+            turboMaxMicroStepChars: 640_000
+        )
+
+        for _ in 0..<4 {
+            _ = controller.tune(
+                lastApplyMs: 2.0,
+                lastParseMs: 600.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0
+            )
+        }
+
+        XCTAssertTrue(controller.idleBoostSuppressed)
+
+        for i in 1...3 {
+            let snapshot = controller.tune(
+                lastApplyMs: 1.0,
+                lastParseMs: 40.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0
+            )
+            if i < 3 {
+                XCTAssertTrue(snapshot.idleBoostSuppressed, "Turbo idle boost should stay suppressed until the stable window is earned")
+            }
+        }
+
+        XCTAssertFalse(controller.idleBoostSuppressed, "Three cheap turbo slices should re-enable turbo idle boost")
+        XCTAssertGreaterThanOrEqual(controller.stableLowPressureStreak, 3)
+    }
+
+    func testAdaptiveBudgetTurboRegrowsAfterStableModerateParseWindows() {
+        var controller = StagedPromotionAdaptiveBudgetController(
+            resetMicroStepChars: 448_000,
+            minMicroStepChars: 128_000,
+            normalMaxMicroStepChars: 2_400_000,
+            turboMaxMicroStepChars: 640_000
+        )
+
+        for _ in 0..<4 {
+            _ = controller.tune(
+                lastApplyMs: 2.0,
+                lastParseMs: 600.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0
+            )
+        }
+
+        XCTAssertLessThan(controller.microStepChars, 448_000, "High parse pressure should shrink the turbo cap")
+        XCTAssertGreaterThanOrEqual(controller.microStepChars, 128_000, "Turbo cap should stay above the hard floor until pressure is extreme")
+
+        for _ in 0..<5 {
+            _ = controller.tune(
+                lastApplyMs: 2.0,
+                lastParseMs: 260.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0
+            )
+        }
+
+        XCTAssertFalse(controller.idleBoostSuppressed, "Stable moderate off-main parse windows should re-enable turbo idle growth")
+        XCTAssertGreaterThan(controller.microStepChars, 128_000, "Turbo cap should regrow once moderate parse windows stabilize below the turbo low-pressure lane")
+    }
+
+    func testAdaptiveBudgetTurboOffMainImportKeepsLargerSlicesUnderModerateParsePressure() {
+        var controller = StagedPromotionAdaptiveBudgetController(
+            resetMicroStepChars: 448_000,
+            minMicroStepChars: 128_000,
+            normalMaxMicroStepChars: 2_400_000,
+            turboMaxMicroStepChars: 640_000
+        )
+
+        for _ in 0..<5 {
+            _ = controller.tune(
+                lastApplyMs: 2.0,
+                lastParseMs: 340.0,
+                useTurbo: true,
+                frameBudgetMs: 4.0,
+                requiredMainActorImport: false
+            )
+        }
+
+        XCTAssertFalse(controller.idleBoostSuppressed, "Off-main turbo imports should not suppress idle growth under moderate parse pressure")
+        XCTAssertGreaterThan(controller.microStepChars, 448_000, "Off-main turbo imports should regrow toward larger slices when apply latency stays cheap")
     }
 
     @MainActor

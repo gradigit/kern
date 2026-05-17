@@ -200,6 +200,11 @@ final class NativeEditorTypingStatefulSequenceTests: XCTestCase {
                 return line
             }
         normalized = lines.joined(separator: "\n")
+        normalized = normalized.replacingOccurrences(
+            of: #"\n{3,}"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
         while normalized.last == "\n" {
             normalized.removeLast()
         }

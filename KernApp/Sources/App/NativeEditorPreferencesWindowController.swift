@@ -133,7 +133,7 @@ final class NativeEditorPreferencesWindowController: NSWindowController, NSTextF
             remoteImageLoadingCheckbox.state =
                 defaults.bool(forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey) ? .on : .off
         } else {
-            remoteImageLoadingCheckbox.state = .on
+            remoteImageLoadingCheckbox.state = .off
         }
     }
 
@@ -169,7 +169,7 @@ final class NativeEditorPreferencesWindowController: NSWindowController, NSTextF
         defaults.removeObject(forKey: NativeEditorAppearance.customThemeJSONKey)
         defaults.set(16, forKey: NativeEditorAppearance.fontSizeKey)
         defaults.set(NativeEditorTableOverflowMode.wrap.rawValue, forKey: NativeEditorAppearance.tableOverflowModeKey)
-        defaults.set(true, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
+        defaults.set(false, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
 
         refreshFromDefaults()
         postPreferencesDidChange()

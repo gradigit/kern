@@ -33,11 +33,13 @@ mkdir -p "$OUT_DIR"
 
 if [[ "$LANE" == "pr" ]]; then
   SCHEME="KernTextKitExhaustive"
+  export KERN_TYPING_COVERAGE_LANE="${KERN_TYPING_COVERAGE_LANE:-pr}"
   export KERN_TYPING_STATEFUL_ENFORCE="${KERN_TYPING_STATEFUL_ENFORCE:-1}"
   export KERN_TYPING_STATEFUL_SEEDS="${KERN_TYPING_STATEFUL_SEEDS:-24}"
   export KERN_TYPING_STATEFUL_STEPS="${KERN_TYPING_STATEFUL_STEPS:-50}"
 else
   SCHEME="KernTextKitUltraExhaustive"
+  export KERN_TYPING_COVERAGE_LANE="${KERN_TYPING_COVERAGE_LANE:-nightly}"
   export KERN_TYPING_STATEFUL_ENFORCE="${KERN_TYPING_STATEFUL_ENFORCE:-1}"
   export KERN_TYPING_STATEFUL_SEEDS="${KERN_TYPING_STATEFUL_SEEDS:-120}"
   export KERN_TYPING_STATEFUL_STEPS="${KERN_TYPING_STATEFUL_STEPS:-120}"
@@ -47,6 +49,7 @@ cat > "$OUT_DIR/config.txt" <<EOF
 lane=$LANE
 scheme=$SCHEME
 timestamp=$TS
+KERN_TYPING_COVERAGE_LANE=$KERN_TYPING_COVERAGE_LANE
 KERN_TYPING_STATEFUL_ENFORCE=$KERN_TYPING_STATEFUL_ENFORCE
 KERN_TYPING_STATEFUL_SEEDS=$KERN_TYPING_STATEFUL_SEEDS
 KERN_TYPING_STATEFUL_STEPS=$KERN_TYPING_STATEFUL_STEPS
@@ -80,6 +83,31 @@ if [[ $STATUS -ne 0 ]]; then
   exit $STATUS
 fi
 
-echo "result=PASS" > "$OUT_DIR/summary.txt"
+{
+  echo "result=PASS"
+  coverage_block="$(python3 - "$OUT_DIR/xcodebuild.log" <<'PY'
+import pathlib
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+start = None
+end = None
+for index, line in enumerate(lines):
+    if line.strip() == "typing_behavior_matrix_coverage":
+        start = index
+for index in range(start or 0, len(lines)):
+    if start is not None and lines[index].startswith("missing_required_edges="):
+        end = index
+if start is None:
+    sys.exit(0)
+block = lines[start:(end + 1 if end is not None else len(lines))]
+print("\n".join(block))
+PY
+)"
+  if [[ -n "$coverage_block" ]]; then
+    echo "$coverage_block"
+  fi
+} > "$OUT_DIR/summary.txt"
 echo "Typing behavior gate PASSED"
 echo "Artifacts: $OUT_DIR"

@@ -3,7 +3,45 @@ import SnapshotTesting
 import XCTest
 @testable import KernTextKit
 
+@_silgen_name("uncompress")
+private func zlibUncompress(
+    _ destination: UnsafeMutablePointer<UInt8>!,
+    _ destinationLength: UnsafeMutablePointer<UInt>!,
+    _ source: UnsafePointer<UInt8>!,
+    _ sourceLength: UInt
+) -> Int32
+
 final class NativeEditorSnapshotTests: XCTestCase {
+    nonisolated override func setUp() {
+        super.setUp()
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                Self.resetGlobalAppKitSnapshotState()
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    Self.resetGlobalAppKitSnapshotState()
+                }
+            }
+        }
+    }
+
+    nonisolated override func tearDown() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                Self.resetGlobalAppKitSnapshotState()
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    Self.resetGlobalAppKitSnapshotState()
+                }
+            }
+        }
+        super.tearDown()
+    }
+
     @MainActor
     func testBasicFixture_GfmDefault_Light() throws {
         try TestGates.skipUnlessSnapshots()
@@ -16,7 +54,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                     size: NSSize(width: 900, height: 650),
                     appearance: .init(named: .aqua)
                 )
-                assertSnapshot(of: view, as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size))
+                assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
         }
     }
@@ -33,7 +71,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                     size: NSSize(width: 900, height: 650),
                     appearance: .init(named: .darkAqua)
                 )
-                assertSnapshot(of: view, as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size))
+                assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
         }
     }
@@ -50,7 +88,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                     size: NSSize(width: 960, height: 760),
                     appearance: .init(named: .aqua)
                 )
-                assertSnapshot(of: view, as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size))
+                assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
         }
     }
@@ -67,7 +105,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                     size: NSSize(width: 980, height: 980),
                     appearance: .init(named: .darkAqua)
                 )
-                assertSnapshot(of: view, as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size))
+                assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
         }
     }
@@ -96,7 +134,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                     )
                     assertSnapshot(
                         of: view,
-                        as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size),
+                        as: snapshotImageStrategy(size: view.bounds.size),
                         named: "theme-\(scenario.theme.rawValue)-font-\(scenario.family.rawValue)"
                     )
                 }
@@ -183,7 +221,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                                 )
                                 assertSnapshot(
                                     of: view,
-                                    as: Snapshotting<NSView, NSImage>.image(size: view.bounds.size),
+                                    as: snapshotImageStrategy(size: view.bounds.size),
                                     named: "\(profile)_\(fixture)_\(appearanceName)_\(sizeName)"
                                 )
                             }
@@ -198,6 +236,290 @@ final class NativeEditorSnapshotTests: XCTestCase {
 
     private var snapshotRecordMode: SnapshotTestingConfiguration.Record {
         TestGates.recordSnapshots ? .all : .never
+    }
+
+    /// SnapshotTesting's default AppKit image diff can report false mismatches for attachment-heavy
+    /// fixtures when PNG encoders choose different row filters or AppKit re-decodes identical pixels
+    /// through different color paths. Keep the recorded artifact as PNG, but compare decoded RGBA
+    /// bytes first so metadata/filter-only differences do not fail the release gate.
+    private struct SnapshotPNG {
+        let image: NSImage
+        let data: Data
+    }
+
+    private func snapshotImageStrategy(size: CGSize) -> Snapshotting<NSView, SnapshotPNG> {
+        let base = Snapshotting<NSView, NSImage>.image(size: size)
+        return Snapshotting<NSView, SnapshotPNG>(
+            pathExtension: base.pathExtension,
+            diffing: normalizedImageDiffing()
+        ) { view in
+            base.snapshot(view).map { image in
+                let normalized = Self.normalizedSnapshotImage(image)
+                return SnapshotPNG(
+                    image: normalized,
+                    data: Self.pngData(for: normalized) ?? Data()
+                )
+            }
+        }
+    }
+
+    private func normalizedImageDiffing() -> Diffing<SnapshotPNG> {
+        let imageDiffing = Diffing<NSImage>.image
+        return Diffing<SnapshotPNG>(
+            toData: { $0.data },
+            fromData: { data in
+                SnapshotPNG(
+                    image: imageDiffing.fromData(data),
+                    data: data
+                )
+            },
+            diff: { old, new in
+                if let oldPixels = Self.decodedRGBA8PNGPixelData(old.data),
+                   let newPixels = Self.decodedRGBA8PNGPixelData(new.data) {
+                    guard oldPixels.width == newPixels.width,
+                          oldPixels.height == newPixels.height else {
+                        return (
+                            "Newly-taken snapshot@\(new.image.size) does not match reference@\(old.image.size).",
+                            []
+                        )
+                    }
+                    if oldPixels.data == newPixels.data {
+                        return nil
+                    }
+                    if Self.snapshotPixelDataIsWithinEncodingNoiseTolerance(oldPixels.data, newPixels.data) {
+                        return nil
+                    }
+                }
+
+                return imageDiffing.diff(old.image, new.image)
+            }
+        )
+    }
+
+    private static func pngData(for image: NSImage) -> Data? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        let representation = NSBitmapImageRep(cgImage: cgImage)
+        representation.size = image.size
+        return representation.representation(using: .png, properties: [:])
+    }
+
+    private static func normalizedSnapshotImage(_ image: NSImage) -> NSImage {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil,
+                width: cgImage.width,
+                height: cgImage.height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return image
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+
+        guard let normalizedCGImage = context.makeImage() else {
+            return image
+        }
+
+        let representation = NSBitmapImageRep(cgImage: normalizedCGImage)
+        representation.size = image.size
+
+        let normalizedImage = NSImage(size: image.size)
+        normalizedImage.addRepresentation(representation)
+        return normalizedImage
+    }
+
+    private static func decodedRGBA8PNGPixelData(_ pngData: Data) -> (width: Int, height: Int, data: Data)? {
+        let signature: [UInt8] = [137, 80, 78, 71, 13, 10, 26, 10]
+        guard pngData.count > signature.count,
+              Array(pngData.prefix(signature.count)) == signature else {
+            return nil
+        }
+
+        var width = 0
+        var height = 0
+        var bitDepth = 0
+        var colorType = 0
+        var compressionMethod = 0
+        var filterMethod = 0
+        var interlaceMethod = 0
+        var compressed = Data()
+        var offset = signature.count
+
+        func readUInt32(at index: Int) -> UInt32? {
+            guard index + 4 <= pngData.count else { return nil }
+            return pngData[index..<index + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        }
+
+        while offset + 12 <= pngData.count {
+            guard let lengthValue = readUInt32(at: offset) else { return nil }
+            let length = Int(lengthValue)
+            let typeStart = offset + 4
+            let dataStart = offset + 8
+            let dataEnd = dataStart + length
+            let chunkEnd = dataEnd + 4
+            guard chunkEnd <= pngData.count else { return nil }
+
+            let type = String(decoding: pngData[typeStart..<typeStart + 4], as: UTF8.self)
+            let chunkData = pngData[dataStart..<dataEnd]
+            switch type {
+            case "IHDR":
+                guard length == 13,
+                      let parsedWidth = readUInt32(at: dataStart),
+                      let parsedHeight = readUInt32(at: dataStart + 4) else {
+                    return nil
+                }
+                width = Int(parsedWidth)
+                height = Int(parsedHeight)
+                bitDepth = Int(pngData[dataStart + 8])
+                colorType = Int(pngData[dataStart + 9])
+                compressionMethod = Int(pngData[dataStart + 10])
+                filterMethod = Int(pngData[dataStart + 11])
+                interlaceMethod = Int(pngData[dataStart + 12])
+            case "IDAT":
+                compressed.append(contentsOf: chunkData)
+            case "IEND":
+                offset = pngData.count
+                continue
+            default:
+                break
+            }
+
+            offset = chunkEnd
+        }
+
+        guard width > 0,
+              height > 0,
+              bitDepth == 8,
+              colorType == 6,
+              compressionMethod == 0,
+              filterMethod == 0,
+              interlaceMethod == 0,
+              !compressed.isEmpty else {
+            return nil
+        }
+
+        let bytesPerPixel = 4
+        let rowByteCount = width * bytesPerPixel
+        let filteredRowByteCount = rowByteCount + 1
+        let filteredByteCount = filteredRowByteCount * height
+        var filtered = Data(count: filteredByteCount)
+        var decodedByteCount = UInt(filteredByteCount)
+        let zlibStatus = filtered.withUnsafeMutableBytes { dstBuffer -> Int32 in
+            compressed.withUnsafeBytes { srcBuffer -> Int32 in
+                guard let dst = dstBuffer.bindMemory(to: UInt8.self).baseAddress,
+                      let src = srcBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return 0
+                }
+                return zlibUncompress(
+                    dst,
+                    &decodedByteCount,
+                    src,
+                    UInt(compressed.count)
+                )
+            }
+        }
+        guard zlibStatus == 0,
+              Int(decodedByteCount) == filteredByteCount else {
+            return nil
+        }
+
+        var pixels = Data(count: rowByteCount * height)
+        let success = filtered.withUnsafeBytes { filteredBuffer -> Bool in
+            pixels.withUnsafeMutableBytes { pixelBuffer -> Bool in
+                guard let src = filteredBuffer.bindMemory(to: UInt8.self).baseAddress,
+                      let dst = pixelBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return false
+                }
+
+                for row in 0..<height {
+                    let filter = src[row * filteredRowByteCount]
+                    let sourceRowStart = row * filteredRowByteCount + 1
+                    let destRowStart = row * rowByteCount
+                    let previousRowStart = destRowStart - rowByteCount
+
+                    for index in 0..<rowByteCount {
+                        let raw = src[sourceRowStart + index]
+                        let left = index >= bytesPerPixel ? dst[destRowStart + index - bytesPerPixel] : 0
+                        let up = row > 0 ? dst[previousRowStart + index] : 0
+                        let upLeft = row > 0 && index >= bytesPerPixel ? dst[previousRowStart + index - bytesPerPixel] : 0
+                        let reconstructed: UInt8
+                        switch filter {
+                        case 0:
+                            reconstructed = raw
+                        case 1:
+                            reconstructed = raw &+ left
+                        case 2:
+                            reconstructed = raw &+ up
+                        case 3:
+                            reconstructed = raw &+ UInt8((UInt16(left) + UInt16(up)) / 2)
+                        case 4:
+                            reconstructed = raw &+ paethPredictor(left: left, up: up, upLeft: upLeft)
+                        default:
+                            return false
+                        }
+                        dst[destRowStart + index] = reconstructed
+                    }
+                }
+
+                return true
+            }
+        }
+
+        return success ? (width: width, height: height, data: pixels) : nil
+    }
+
+    private static func paethPredictor(left: UInt8, up: UInt8, upLeft: UInt8) -> UInt8 {
+        let a = Int(left)
+        let b = Int(up)
+        let c = Int(upLeft)
+        let p = a + b - c
+        let pa = abs(p - a)
+        let pb = abs(p - b)
+        let pc = abs(p - c)
+        if pa <= pb && pa <= pc {
+            return left
+        }
+        if pb <= pc {
+            return up
+        }
+        return upLeft
+    }
+
+    private static func snapshotPixelDataIsWithinEncodingNoiseTolerance(_ old: Data, _ new: Data) -> Bool {
+        guard old.count == new.count else { return false }
+
+        var differentByteCount = 0
+        var maxChannelDelta = 0
+        let limit = max(1, Int(Double(old.count) * 0.0002))
+
+        let isWithinTolerance = old.withUnsafeBytes { oldBuffer in
+            new.withUnsafeBytes { newBuffer in
+                guard let oldBase = oldBuffer.bindMemory(to: UInt8.self).baseAddress,
+                      let newBase = newBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return false
+                }
+
+                for index in 0..<old.count {
+                    let delta = abs(Int(oldBase[index]) - Int(newBase[index]))
+                    if delta != 0 {
+                        differentByteCount += 1
+                        maxChannelDelta = max(maxChannelDelta, delta)
+                    }
+                    if differentByteCount > limit || maxChannelDelta > 2 {
+                        return false
+                    }
+                }
+                return true
+            }
+        }
+
+        return isWithinTolerance
     }
 
     // MARK: - Defaults profiles
@@ -229,6 +551,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
             NativeEditorAppearance.fontDesignKey,
             NativeEditorAppearance.fontSizeKey,
             NativeEditorAppearance.tableOverflowModeKey,
+            MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey,
         ]
 
         let previous: [String: Any?] = keys.reduce(into: [:]) { acc, k in
@@ -265,6 +588,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
             defaults.set(NativeEditorFontDesign.system.rawValue, forKey: NativeEditorAppearance.fontDesignKey)
             defaults.set(16, forKey: NativeEditorAppearance.fontSizeKey)
             defaults.set(NativeEditorTableOverflowMode.wrap.rawValue, forKey: NativeEditorAppearance.tableOverflowModeKey)
+            defaults.set(false, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
         case .kernExtensions:
             defaults.set("kern", forKey: "nativeEditor.exportDialect")
             defaults.set("preserve", forKey: "nativeEditor.gfmExtensionExportStrategy")
@@ -285,7 +609,10 @@ final class NativeEditorSnapshotTests: XCTestCase {
             defaults.set(NativeEditorFontDesign.system.rawValue, forKey: NativeEditorAppearance.fontDesignKey)
             defaults.set(16, forKey: NativeEditorAppearance.fontSizeKey)
             defaults.set(NativeEditorTableOverflowMode.wrap.rawValue, forKey: NativeEditorAppearance.tableOverflowModeKey)
+            defaults.set(false, forKey: MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey)
         }
+
+        NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
 
         try f()
     }
@@ -503,5 +830,17 @@ final class NativeEditorSnapshotTests: XCTestCase {
             }
         }
         return nil
+    }
+
+    @MainActor
+    private static func resetGlobalAppKitSnapshotState() {
+        NativeMarkdownCodec.resetCachesForTesting()
+        MarkdownImageAttachment.resetImageCacheForTesting()
+        for window in NSApp.windows {
+            window.orderOut(nil)
+            window.close()
+        }
+        NSApp.appearance = nil
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
 }

@@ -11,6 +11,36 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
         let expectedExportSource: (String) -> String
     }
 
+    override func setUp() {
+        super.setUp()
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                Self.resetGlobalEditorTestState()
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    Self.resetGlobalEditorTestState()
+                }
+            }
+        }
+    }
+
+    override func tearDown() {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                Self.resetGlobalEditorTestState()
+            }
+        } else {
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    Self.resetGlobalEditorTestState()
+                }
+            }
+        }
+        super.tearDown()
+    }
+
     @MainActor
     func testHybridModeExpandsInlineLinkNearCaretAndCollapsesWhenCaretLeaves() {
         withTemporaryDefaults([
@@ -31,11 +61,11 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             guard docs.location != NSNotFound else { return }
 
             textView.setSelectedRange(NSRange(location: docs.location + 1, length: 0))
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
             XCTAssertTrue(
-                textView.string.contains("[docs](https://example.com/docs)"),
+                waitUntil { textView.string.contains("[docs](https://example.com/docs)") },
                 "Hybrid mode should expand inline link syntax when caret enters link label"
             )
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
 
             let expanded = textView.string as NSString
             let tail = expanded.range(of: "tail")
@@ -43,10 +73,9 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             guard tail.location != NSNotFound else { return }
 
             textView.setSelectedRange(NSRange(location: tail.location, length: 0))
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
 
-            XCTAssertFalse(
-                textView.string.contains("[docs]("),
+            XCTAssertTrue(
+                waitUntil(timeout: 0.5) { !textView.string.contains("[docs](") },
                 "Hybrid mode should collapse back to WYSIWYG when caret leaves expanded span"
             )
 
@@ -78,8 +107,7 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             guard docs.location != NSNotFound else { return }
 
             textView.setSelectedRange(NSRange(location: docs.location + 1, length: 0))
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
-            XCTAssertTrue(textView.string.contains("[docs](https://example.com/docs)"))
+            XCTAssertTrue(waitUntil { textView.string.contains("[docs](https://example.com/docs)") })
 
             let expanded = textView.string as NSString
             let expandedDocs = expanded.range(of: "docs")
@@ -146,10 +174,11 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             ),
         ]
 
-        withTemporaryDefaults([
-            NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
-        ]) {
-            for testCase in cases {
+        for testCase in cases {
+            Self.resetGlobalEditorTestState()
+            withTemporaryDefaults([
+                NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+            ]) {
                 let vc = NativeEditorViewController()
                 _ = vc.view
                 vc.stringValue = "\(testCase.markdown)\n\nafter"
@@ -165,29 +194,32 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
                 let visible = textView.string as NSString
                 let tokenRange = visible.range(of: testCase.visibleToken)
                 XCTAssertNotEqual(tokenRange.location, NSNotFound, "[\(testCase.id)] visible token missing before expansion")
-                guard tokenRange.location != NSNotFound else { continue }
+                if tokenRange.location == NSNotFound { return }
+                let storage = textView.textStorage
+                let attrs = storage?.attributes(at: tokenRange.location, effectiveRange: nil) ?? [:]
+                let attrSummary = "strong=\((attrs[.kernStrong] as? Bool) ?? false) emphasis=\((attrs[.kernEmphasis] as? Bool) ?? false) inlineCode=\((attrs[.kernInlineCode] as? Bool) ?? false) strike=\((attrs[.kernStrikethrough] as? Bool) ?? false)"
 
                 textView.setSelectedRange(NSRange(location: tokenRange.location + 1, length: 0))
-                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
 
                 XCTAssertTrue(
-                    textView.string.contains(testCase.expectedExpandedSource),
-                    "[\(testCase.id)] should expose markdown syntax near caret"
+                    waitUntil { textView.string.contains(testCase.expectedExpandedSource) },
+                    "[\(testCase.id)] should expose markdown syntax near caret. \(attrSummary) got=\(textView.string)"
                 )
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
 
                 let afterRange = (textView.string as NSString).range(of: "after")
                 XCTAssertNotEqual(afterRange.location, NSNotFound, "[\(testCase.id)] anchor token missing")
-                guard afterRange.location != NSNotFound else { continue }
+                if afterRange.location == NSNotFound { return }
 
                 textView.setSelectedRange(NSRange(location: afterRange.location, length: 0))
-                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
 
-                XCTAssertFalse(
-                    textView.string.contains(testCase.expectedExpandedSource),
+                XCTAssertTrue(
+                    waitUntil(timeout: 0.5) { !textView.string.contains(testCase.expectedExpandedSource) },
                     "[\(testCase.id)] should collapse syntax after caret leaves span"
                 )
             }
         }
+        Self.resetGlobalEditorTestState()
     }
 
     @MainActor
@@ -223,10 +255,11 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             ),
         ]
 
-        withTemporaryDefaults([
-            NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
-        ]) {
-            for testCase in cases {
+        for testCase in cases {
+            Self.resetGlobalEditorTestState()
+            withTemporaryDefaults([
+                NativeEditorSyntaxVisibilityMode.userDefaultsKey: NativeEditorSyntaxVisibilityMode.hybrid.rawValue,
+            ]) {
                 let vc = NativeEditorViewController()
                 _ = vc.view
                 vc.stringValue = "\(testCase.markdown)\n\nafter"
@@ -237,16 +270,15 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
                 let visible = textView.string as NSString
                 let tokenRange = visible.range(of: testCase.visibleToken)
                 XCTAssertNotEqual(tokenRange.location, NSNotFound, "[\(testCase.id)] visible token missing before edit")
-                guard tokenRange.location != NSNotFound else { continue }
+                if tokenRange.location == NSNotFound { return }
 
                 textView.setSelectedRange(NSRange(location: tokenRange.location + 1, length: 0))
-                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
-                XCTAssertTrue(textView.string.contains(testCase.expectedExpandedSource), "[\(testCase.id)] expected expanded source before edit")
+                XCTAssertTrue(waitUntil { textView.string.contains(testCase.expectedExpandedSource) }, "[\(testCase.id)] expected expanded source before edit")
 
                 let replacement = "edited-\(testCase.id)"
                 let expandedRange = (textView.string as NSString).range(of: testCase.visibleToken)
                 XCTAssertNotEqual(expandedRange.location, NSNotFound, "[\(testCase.id)] token missing after expansion")
-                guard expandedRange.location != NSNotFound else { continue }
+                if expandedRange.location == NSNotFound { return }
 
                 textView.insertText("", replacementRange: expandedRange)
                 textView.insertText(replacement, replacementRange: textView.selectedRange())
@@ -254,7 +286,7 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
 
                 let afterRange = (textView.string as NSString).range(of: "after")
                 XCTAssertNotEqual(afterRange.location, NSNotFound, "[\(testCase.id)] anchor token missing after edit")
-                guard afterRange.location != NSNotFound else { continue }
+                if afterRange.location == NSNotFound { return }
                 textView.setSelectedRange(NSRange(location: afterRange.location, length: 0))
                 RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
 
@@ -273,6 +305,7 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
                 )
             }
         }
+        Self.resetGlobalEditorTestState()
     }
 
     @MainActor
@@ -340,10 +373,9 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
                 forKey: NativeEditorSyntaxVisibilityMode.userDefaultsKey
             )
             NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
 
             XCTAssertTrue(
-                textView.string.contains("**bold**"),
+                waitUntil { textView.string.contains("**bold**") },
                 "Switching to hybrid mode should expand inline syntax at current caret without extra cursor movement"
             )
         }
@@ -374,8 +406,7 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             guard docsRange.location != NSNotFound else { return }
 
             textView.setSelectedRange(NSRange(location: docsRange.location + 1, length: 0))
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
-            XCTAssertTrue(textView.string.contains("[docs](https://example.com/docs)"))
+            XCTAssertTrue(waitUntil { textView.string.contains("[docs](https://example.com/docs)") })
             let beforeCollapseY = vc.scrollOriginYForTesting()
 
             let anchorRange = (textView.string as NSString).range(of: "line 141 anchor")
@@ -403,6 +434,7 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             saved[key] = defaults.object(forKey: key)
             defaults.set(value, forKey: key)
         }
+        NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
         defer {
             for (key, previous) in saved {
                 if let previous {
@@ -414,5 +446,29 @@ final class NativeEditorHybridSyntaxModeTests: XCTestCase {
             NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
         }
         return try body()
+    }
+
+    @MainActor
+    private func waitUntil(timeout: TimeInterval = 0.25, pollInterval: TimeInterval = 0.01, _ predicate: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if predicate() {
+                return true
+            }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: pollInterval))
+        } while Date() < deadline
+        return predicate()
+    }
+
+    @MainActor
+    private static func resetGlobalEditorTestState() {
+        NativeMarkdownCodec.resetCachesForTesting()
+        MarkdownImageAttachment.resetImageCacheForTesting()
+        for window in NSApp.windows {
+            window.orderOut(nil)
+            window.close()
+        }
+        NSApp.appearance = nil
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
 }

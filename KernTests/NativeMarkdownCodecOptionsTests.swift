@@ -66,6 +66,42 @@ final class NativeMarkdownCodecOptionsTests: XCTestCase {
         XCTAssertFalse(opt.largeDocumentPlainImportEnabled)
     }
 
+    func testRemoteImageLoadingDefaultsToDisabledWhenUnset() {
+        let defaults = UserDefaults.standard
+        let key = MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey
+        let hadValue = defaults.object(forKey: key) != nil
+        let previous = defaults.object(forKey: key)
+        defaults.removeObject(forKey: key)
+        defer {
+            if hadValue {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let opt = NativeMarkdownCodec.Options.fromUserDefaults(defaults)
+        XCTAssertFalse(opt.remoteImageLoadingEnabled)
+    }
+
+    func testFromUserDefaultsReadsRemoteImageLoadingPreference() {
+        let defaults = UserDefaults.standard
+        let key = MarkdownImageAttachment.remoteImageLoadingUserDefaultsKey
+        let hadValue = defaults.object(forKey: key) != nil
+        let previous = defaults.object(forKey: key)
+        defaults.set(true, forKey: key)
+        defer {
+            if hadValue {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let opt = NativeMarkdownCodec.Options.fromUserDefaults(defaults)
+        XCTAssertTrue(opt.remoteImageLoadingEnabled)
+    }
+
     @MainActor
     func testTaskRenderingKernShowsBulletDotForBulletedTasks() {
         let md = "- [ ] todo"
