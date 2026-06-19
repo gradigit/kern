@@ -118,6 +118,43 @@ final class NativeEditorInitialViewportTests: XCTestCase {
     }
 
     @MainActor
+    func testReadableEditorColumnCentersInWideViewportAndKeepsCompactInsetInNarrowViewport() {
+        let markdown = """
+        A plain paragraph that should sit in a centered readable column.
+
+        ```swift
+        let centered = true
+        ```
+        """
+
+        let wide = makeHostedEditorWindow(size: NSSize(width: 1400, height: 720), markdown: markdown)
+        defer { wide.window.close() }
+
+        XCTAssertColumnIsCentered(
+            in: wide.textView,
+            viewportWidth: wide.scrollView.contentView.bounds.width,
+            expectedMinimumInset: 250,
+            message: "Wide editor view should center the readable TextKit column instead of pinning it left."
+        )
+
+        let narrow = makeHostedEditorWindow(size: NSSize(width: 620, height: 520), markdown: markdown)
+        defer { narrow.window.close() }
+
+        XCTAssertEqual(
+            narrow.textView.textContainerInset.width,
+            32,
+            accuracy: 0.5,
+            "Narrow editor view should keep the compact editing inset instead of over-centering content."
+        )
+        XCTAssertColumnIsCentered(
+            in: narrow.textView,
+            viewportWidth: narrow.scrollView.contentView.bounds.width,
+            expectedMinimumInset: 31,
+            message: "Narrow editor column should still have balanced left/right margins."
+        )
+    }
+
+    @MainActor
     func testStagedOpenEventuallyAppliesDeferredFullRendering() {
         let previousForceStaged = getenv("KERN_FORCE_STAGED_OPEN").map { String(cString: $0) }
         let previousPrefixLines = getenv("KERN_STAGED_OPEN_PREFIX_LINES").map { String(cString: $0) }
@@ -1249,6 +1286,55 @@ final class NativeEditorInitialViewportTests: XCTestCase {
 
         XCTAssertFalse(controller.idleBoostSuppressed, "Off-main turbo imports should not suppress idle growth under moderate parse pressure")
         XCTAssertGreaterThan(controller.microStepChars, 448_000, "Off-main turbo imports should regrow toward larger slices when apply latency stays cheap")
+    }
+
+    private struct HostedEditorWindow {
+        let window: NSWindow
+        let scrollView: NSScrollView
+        let textView: NSTextView
+    }
+
+    @MainActor
+    private func makeHostedEditorWindow(size: NSSize, markdown: String) -> HostedEditorWindow {
+        let vc = NativeEditorViewController()
+        _ = vc.view
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = vc
+        window.setFrame(NSRect(origin: .zero, size: size), display: true)
+        window.layoutIfNeeded()
+
+        vc.stringValue = markdown
+        vc.view.layoutSubtreeIfNeeded()
+        window.layoutIfNeeded()
+
+        guard let scrollView = findSubview(withAXIdentifier: "NativeEditor.ScrollView", in: vc.view) as? NSScrollView,
+              let textView = findSubview(withAXIdentifier: "NativeEditor.TextView", in: vc.view) as? NSTextView else {
+            fatalError("Missing hosted native editor views")
+        }
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        return HostedEditorWindow(window: window, scrollView: scrollView, textView: textView)
+    }
+
+    @MainActor
+    private func XCTAssertColumnIsCentered(
+        in textView: NSTextView,
+        viewportWidth: CGFloat,
+        expectedMinimumInset: CGFloat,
+        message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let textContainer = textView.textContainer else {
+            XCTFail("Missing text container", file: file, line: line)
+            return
+        }
+
+        let leftMargin = textView.textContainerOrigin.x
+        let rightMargin = viewportWidth - leftMargin - textContainer.containerSize.width
+
+        XCTAssertGreaterThanOrEqual(leftMargin, expectedMinimumInset, message, file: file, line: line)
+        XCTAssertEqual(leftMargin, rightMargin, accuracy: 1.5, message, file: file, line: line)
     }
 
     @MainActor

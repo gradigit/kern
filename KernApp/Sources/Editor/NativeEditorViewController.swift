@@ -492,6 +492,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
     private let scrollView = NSScrollView()
     private let textView = NativeMarkdownTextView()
+    private let minimumEditorHorizontalInset: CGFloat = 32
+    private let maximumReadableEditorWidth: CGFloat = 760
     private struct TableOverflowAnalysis {
         var widestLikelyTableRowCharacters: Int = 0
         var widestLikelyTableColumnCount: Int = 0
@@ -1063,17 +1065,22 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private func syncTextContainerSizeToScrollViewWidth() {
         guard let tc = textView.textContainer else { return }
         let viewportWidth = max(0, scrollView.contentView.bounds.width)
+        let horizontalInset = readableHorizontalInset(forViewportWidth: viewportWidth)
+        let readableWidth = max(0, viewportWidth - horizontalInset * 2)
+
         // Keep the primary document viewport width-locked.
         // Document-wide horizontal scrolling creates poor UX for mixed-content markdown files:
         // a single wide table should not force the entire editor surface to scroll sideways.
         //
-        // Horizontal table mode is now reserved for table-local overflow behavior (future work),
-        // so we intentionally keep document-level overflow disabled here.
-        tc.widthTracksTextView = true
+        // The text view still spans the viewport, but TextKit's layout container is capped to a
+        // readable width and centered by symmetric insets. This keeps wide windows from looking like
+        // a left-pinned web page while preserving document-level horizontal overflow prevention.
+        tc.widthTracksTextView = false
         tc.containerSize = NSSize(
-            width: viewportWidth,
+            width: readableWidth,
             height: CGFloat.greatestFiniteMagnitude
         )
+        textView.textContainerInset = NSSize(width: horizontalInset, height: textView.textContainerInset.height)
 
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -1087,6 +1094,12 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             textView.frame = frame
         }
         isHorizontalTableOverflowActive = false
+    }
+
+    private func readableHorizontalInset(forViewportWidth viewportWidth: CGFloat) -> CGFloat {
+        guard viewportWidth > 0 else { return minimumEditorHorizontalInset }
+        let idealCenteredInset = floor((viewportWidth - maximumReadableEditorWidth) / 2)
+        return max(minimumEditorHorizontalInset, idealCenteredInset)
     }
 
     private func desiredHorizontalTableOverflowWidth(viewportWidth: CGFloat) -> CGFloat {

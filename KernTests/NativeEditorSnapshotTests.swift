@@ -152,6 +152,73 @@ final class NativeEditorSnapshotTests: XCTestCase {
     }
 
     @MainActor
+    func testFindReplaceOverlaySnapshot_Dark() throws {
+        try TestGates.skipUnlessSnapshots()
+
+        try withNativeEditorDefaults(profile: .gfmDefault) {
+            try withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .darkAqua)
+                applySnapshotTheme(for: appearance)
+                let fixture = try loadFixture(name: "full-spec-visual.fixture.md")
+                let vc = NativeEditorViewController()
+                _ = vc.view
+                let view = hostInWindow(vc: vc, size: NSSize(width: 980, height: 700), appearance: appearance)
+
+                vc.documentURL = fixture.url
+                vc.stringValue = fixture.markdown
+                vc.showFindReplace(nil)
+                if let findField = findSubview(withAXIdentifier: "NativeEditor.FindField", in: view) as? NSSearchField {
+                    findField.stringValue = "inline"
+                    findField.sendAction(findField.action, to: findField.target)
+                }
+
+                settleSnapshotView(view)
+                assertSnapshot(
+                    of: view,
+                    as: snapshotImageStrategy(size: view.bounds.size),
+                    named: "find-replace-overlay-dark"
+                )
+            }
+        }
+    }
+
+    @MainActor
+    func testSettingsWindowSnapshot_Light() throws {
+        try TestGates.skipUnlessSnapshots()
+
+        withNativeEditorDefaults(profile: .gfmDefault) {
+            withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .aqua)
+                applySnapshotTheme(for: appearance)
+                let controller = NativeEditorPreferencesWindowController()
+                defer { controller.close() }
+
+                guard let window = controller.window,
+                      let contentView = window.contentView else {
+                    XCTFail("Expected settings window content view")
+                    return
+                }
+
+                window.appearance = appearance
+                if let appearance {
+                    applyAppearance(appearance, to: contentView)
+                }
+                contentView.wantsLayer = true
+                contentView.layer?.backgroundColor = resolvedWindowBackgroundColor(for: appearance).cgColor
+                window.layoutIfNeeded()
+                contentView.layoutSubtreeIfNeeded()
+                contentView.displayIfNeeded()
+
+                assertSnapshot(
+                    of: contentView,
+                    as: snapshotImageStrategy(size: contentView.bounds.size),
+                    named: "settings-window-light"
+                )
+            }
+        }
+    }
+
+    @MainActor
     func testFullSpecVisualFixture_RenderPipelineKeepsAttachments() throws {
         let fixture = try loadFixture(name: "full-spec-visual.fixture.md")
         let vc = NativeEditorViewController()

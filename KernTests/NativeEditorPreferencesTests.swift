@@ -1,7 +1,47 @@
+import AppKit
 import XCTest
 @testable import KernTextKit
 
 final class NativeEditorPreferencesTests: XCTestCase {
+    @MainActor
+    func testSettingsWindowLaysOutAllVisibleControlsInsideContentView() {
+        let controller = NativeEditorPreferencesWindowController()
+        defer { controller.close() }
+
+        guard let window = controller.window,
+              let contentView = window.contentView else {
+            XCTFail("Expected settings window content view")
+            return
+        }
+
+        window.layoutIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+
+        let controls = allDescendantViews(in: contentView).filter { view in
+            guard !view.isHidden, view.alphaValue > 0 else { return false }
+            return view is NSControl
+        }
+
+        XCTAssertGreaterThanOrEqual(controls.count, 20, "Expected the settings window to expose all editor setting controls")
+
+        let visibleBounds = contentView.bounds.insetBy(dx: -1, dy: -1)
+        let clippedControls = controls.compactMap { view -> String? in
+            let rect = view.convert(view.bounds, to: contentView)
+            guard rect.width > 0, rect.height > 0 else {
+                return "\(type(of: view)) has empty frame \(rect)"
+            }
+            guard visibleBounds.contains(rect) else {
+                return "\(type(of: view)) frame \(rect) is outside content bounds \(contentView.bounds)"
+            }
+            return nil
+        }
+
+        XCTAssertTrue(
+            clippedControls.isEmpty,
+            "Settings controls must not be clipped or hidden below the window:\n\(clippedControls.joined(separator: "\n"))"
+        )
+    }
+
     @MainActor
     func testTaskRenderingPreferenceChangeRerendersOpenEditorImmediately() {
         let defaults = UserDefaults.standard
@@ -302,5 +342,10 @@ final class NativeEditorPreferencesTests: XCTestCase {
             }
         }
         return found
+    }
+
+    @MainActor
+    private func allDescendantViews(in root: NSView) -> [NSView] {
+        root.subviews.flatMap { [$0] + allDescendantViews(in: $0) }
     }
 }
