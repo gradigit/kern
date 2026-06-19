@@ -87,7 +87,9 @@ final class MarkdownImageAttachment: NSTextAttachment {
         self.resolvedURL = MarkdownImageAttachment.resolveURL(destination: destination, baseURL: baseURL)
         self.allowsRemoteLoading = allowsRemoteLoading
         super.init(data: nil, ofType: nil)
-        self.attachmentCell = MarkdownImageAttachmentCell()
+        let cell = MarkdownImageAttachmentCell()
+        cell.attachment = self
+        self.attachmentCell = cell
         loadImageIfNeeded()
     }
 
@@ -98,7 +100,9 @@ final class MarkdownImageAttachment: NSTextAttachment {
         self.resolvedURL = nil
         self.allowsRemoteLoading = false
         super.init(coder: coder)
-        self.attachmentCell = MarkdownImageAttachmentCell()
+        let cell = MarkdownImageAttachmentCell()
+        cell.attachment = self
+        self.attachmentCell = cell
     }
 
     override func attachmentBounds(
@@ -289,6 +293,17 @@ final class MarkdownImageAttachment: NSTextAttachment {
               let tc = textView.textContainer,
               let storage = textView.textStorage else { return }
 
+        let shouldForceContiguousSmallDocumentLayout = storage.length <= 12_000
+        let previousAllowsNonContiguousLayout = lm.allowsNonContiguousLayout
+        if shouldForceContiguousSmallDocumentLayout {
+            lm.allowsNonContiguousLayout = false
+        }
+        defer {
+            if shouldForceContiguousSmallDocumentLayout {
+                lm.allowsNonContiguousLayout = previousAllowsNonContiguousLayout
+            }
+        }
+
         let fullRange = NSRange(location: 0, length: storage.length)
         var attachmentRanges: [NSRange] = []
         storage.enumerateAttribute(.attachment, in: fullRange, options: []) { value, range, _ in
@@ -330,6 +345,98 @@ final class MarkdownImageAttachment: NSTextAttachment {
                 perform(#selector(requestDisplayUpdateOnMainThread), with: nil, afterDelay: 0)
             }
         }
+    }
+
+    fileprivate func drawAttachmentContents(in frame: NSRect) {
+        let background = NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8)
+        NSColor.controlBackgroundColor.withAlphaComponent(0.92).setFill()
+        background.fill()
+        NSColor.separatorColor.withAlphaComponent(0.8).setStroke()
+        background.lineWidth = 1
+        background.stroke()
+
+        switch loadState {
+        case .ready:
+            drawLoadedImage(in: frame)
+        case .loading:
+            drawPlaceholder(
+                in: frame,
+                title: "Loading image",
+                subtitle: altText.isEmpty ? destination : altText
+            )
+        case .failed:
+            drawPlaceholder(
+                in: frame,
+                title: "Image unavailable",
+                subtitle: altText.isEmpty ? destination : altText
+            )
+        }
+    }
+
+    private func drawLoadedImage(in frame: NSRect) {
+        guard let image = renderedImage, image.size.width > 0, image.size.height > 0 else {
+            drawPlaceholder(in: frame, title: "Image unavailable", subtitle: altText)
+            return
+        }
+
+        let captionHeight: CGFloat = altText.isEmpty ? 0 : 18
+        let imageRect = NSRect(
+            x: frame.minX + 4,
+            y: frame.minY + 4 + captionHeight,
+            width: frame.width - 8,
+            height: frame.height - 8 - captionHeight
+        )
+        let fittedImageRect = Self.aspectFitRect(for: image.size, in: imageRect)
+        image.draw(in: fittedImageRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: nil)
+
+        if !altText.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+            let textRect = NSRect(
+                x: frame.minX + 8,
+                y: frame.minY + 4,
+                width: frame.width - 16,
+                height: captionHeight - 2
+            )
+            (altText as NSString).draw(in: textRect, withAttributes: attrs)
+        }
+    }
+
+    private func drawPlaceholder(in frame: NSRect, title: String, subtitle: String) {
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let subtitleAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+
+        let clippedSubtitle = subtitle.isEmpty ? "" : subtitle
+        let titleRect = NSRect(x: frame.minX + 10, y: frame.midY - 4, width: frame.width - 20, height: 18)
+        let subtitleRect = NSRect(x: frame.minX + 10, y: frame.midY - 20, width: frame.width - 20, height: 16)
+
+        (title as NSString).draw(in: titleRect, withAttributes: titleAttrs)
+        if !clippedSubtitle.isEmpty {
+            (clippedSubtitle as NSString).draw(in: subtitleRect, withAttributes: subtitleAttrs)
+        }
+    }
+
+    private static func aspectFitRect(for imageSize: CGSize, in targetRect: NSRect) -> NSRect {
+        guard imageSize.width > 0, imageSize.height > 0, targetRect.width > 0, targetRect.height > 0 else {
+            return targetRect
+        }
+        let scale = min(targetRect.width / imageSize.width, targetRect.height / imageSize.height)
+        let fittedWidth = imageSize.width * scale
+        let fittedHeight = imageSize.height * scale
+        return NSRect(
+            x: targetRect.midX - (fittedWidth / 2),
+            y: targetRect.midY - (fittedHeight / 2),
+            width: fittedWidth,
+            height: fittedHeight
+        ).integral
     }
 
     private static func resolveURL(destination: String, baseURL: URL?) -> URL? {
@@ -402,6 +509,8 @@ final class MarkdownImageAttachment: NSTextAttachment {
 }
 
 private final class MarkdownImageAttachmentCell: NSTextAttachmentCell {
+    private var lastObservedLineFragmentMinY: CGFloat?
+
     override init() {
         super.init(textCell: "")
     }
@@ -416,7 +525,7 @@ private final class MarkdownImageAttachmentCell: NSTextAttachmentCell {
         glyphPosition position: CGPoint,
         characterIndex charIndex: Int
     ) -> NSRect {
-        guard let attachment else {
+        guard let attachment = attachment as? MarkdownImageAttachment else {
             let w = max(1, min(900, lineFrag.width))
             return NSRect(x: 0, y: 0, width: w, height: 96)
         }
@@ -426,103 +535,116 @@ private final class MarkdownImageAttachmentCell: NSTextAttachmentCell {
             glyphPosition: position,
             characterIndex: charIndex
         )
+        lastObservedLineFragmentMinY = max(lastObservedLineFragmentMinY ?? -.greatestFiniteMagnitude, lineFrag.minY)
         return NSRect(x: bounds.origin.x, y: bounds.origin.y, width: bounds.width, height: bounds.height)
     }
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
-        guard let owner = attachment as? MarkdownImageAttachment else { return }
-        owner.didDraw(in: controlView)
-
-        let frame = cellFrame.integral
-        let background = NSBezierPath(roundedRect: frame, xRadius: 8, yRadius: 8)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.92).setFill()
-        background.fill()
-        NSColor.separatorColor.withAlphaComponent(0.8).setStroke()
-        background.lineWidth = 1
-        background.stroke()
-
-        switch owner.loadState {
-        case .ready:
-            drawLoadedImage(owner: owner, in: frame)
-        case .loading:
-            drawPlaceholder(
-                in: frame,
-                title: "Loading image",
-                subtitle: owner.altText.isEmpty ? owner.destination : owner.altText
-            )
-        case .failed:
-            drawPlaceholder(
-                in: frame,
-                title: "Image unavailable",
-                subtitle: owner.altText.isEmpty ? owner.destination : owner.altText
-            )
-        }
+        drawAttachmentImage(attachment as? MarkdownImageAttachment, frame: cellFrame, in: controlView)
     }
 
-    private func drawLoadedImage(owner: MarkdownImageAttachment, in frame: NSRect) {
-        guard let image = owner.renderedImage, image.size.width > 0, image.size.height > 0 else {
-            drawPlaceholder(in: frame, title: "Image unavailable", subtitle: owner.altText)
-            return
+    override func draw(
+        withFrame cellFrame: NSRect,
+        in controlView: NSView?,
+        characterIndex charIndex: Int
+    ) {
+        let storage = (controlView as? NSTextView)?.textStorage
+        let attachment = storage.flatMap { storage -> MarkdownImageAttachment? in
+            guard charIndex >= 0, charIndex < storage.length else { return nil }
+            return storage.attribute(.attachment, at: charIndex, effectiveRange: nil) as? MarkdownImageAttachment
         }
+        let layoutManager = (controlView as? NSTextView)?.layoutManager
+        let drawFrame = attachment.flatMap {
+            if layoutManager?.allowsNonContiguousLayout == true {
+                return resolvedDrawFrame(
+                    for: $0,
+                    characterIndex: charIndex,
+                    layoutManager: layoutManager,
+                    controlView: controlView,
+                    fallbackFrame: cellFrame
+                )
+            }
+            return cellFrame
+        } ?? cellFrame
+        drawAttachmentImage(attachment, frame: drawFrame, in: controlView)
+    }
 
-        let captionHeight: CGFloat = owner.altText.isEmpty ? 0 : 18
-        let imageRect = NSRect(
-            x: frame.minX + 4,
-            y: frame.minY + 4 + captionHeight,
-            width: frame.width - 8,
-            height: frame.height - 8 - captionHeight
+    override func draw(
+        withFrame cellFrame: NSRect,
+        in controlView: NSView?,
+        characterIndex charIndex: Int,
+        layoutManager: NSLayoutManager
+    ) {
+        let attachment = layoutManager.textStorage?.attribute(
+            .attachment,
+            at: charIndex,
+            effectiveRange: nil
+        ) as? MarkdownImageAttachment
+
+        let drawFrame = attachment.flatMap {
+            if layoutManager.allowsNonContiguousLayout {
+                return resolvedDrawFrame(
+                    for: $0,
+                    characterIndex: charIndex,
+                    layoutManager: layoutManager,
+                    controlView: controlView,
+                    fallbackFrame: cellFrame
+                )
+            }
+            return cellFrame
+        } ?? cellFrame
+        drawAttachmentImage(attachment, frame: drawFrame, in: controlView)
+    }
+
+    private func resolvedDrawFrame(
+        for attachment: MarkdownImageAttachment,
+        characterIndex charIndex: Int,
+        layoutManager: NSLayoutManager?,
+        controlView: NSView?,
+        fallbackFrame: NSRect
+    ) -> NSRect? {
+        guard let layoutManager else { return nil }
+        guard charIndex >= 0,
+              let textStorage = layoutManager.textStorage,
+              charIndex < textStorage.length
+        else { return nil }
+
+        let characterRange = NSRange(location: charIndex, length: 1)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: characterRange,
+            actualCharacterRange: nil
         )
-        let fittedImageRect = aspectFitRect(for: image.size, in: imageRect)
-        image.draw(in: fittedImageRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: nil)
+        guard glyphRange.length > 0,
+              let textContainer = layoutManager.textContainer(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil
+              )
+        else { return nil }
 
-        if !owner.altText.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]
-            let textRect = NSRect(
-                x: frame.minX + 8,
-                y: frame.minY + 4,
-                width: frame.width - 16,
-                height: captionHeight - 2
-            )
-            (owner.altText as NSString).draw(in: textRect, withAttributes: attrs)
-        }
-    }
-
-    private func drawPlaceholder(in frame: NSRect, title: String, subtitle: String) {
-        let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.labelColor,
-        ]
-        let subtitleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ]
-
-        let clippedSubtitle = subtitle.isEmpty ? "" : subtitle
-        let titleRect = NSRect(x: frame.minX + 10, y: frame.midY - 4, width: frame.width - 20, height: 18)
-        let subtitleRect = NSRect(x: frame.minX + 10, y: frame.midY - 20, width: frame.width - 20, height: 16)
-
-        (title as NSString).draw(in: titleRect, withAttributes: titleAttrs)
-        if !clippedSubtitle.isEmpty {
-            (clippedSubtitle as NSString).draw(in: subtitleRect, withAttributes: subtitleAttrs)
-        }
-    }
-
-    private func aspectFitRect(for imageSize: CGSize, in targetRect: NSRect) -> NSRect {
-        guard imageSize.width > 0, imageSize.height > 0, targetRect.width > 0, targetRect.height > 0 else {
-            return targetRect
-        }
-        let scale = min(targetRect.width / imageSize.width, targetRect.height / imageSize.height)
-        let fittedWidth = imageSize.width * scale
-        let fittedHeight = imageSize.height * scale
+        let lineFragment = layoutManager.lineFragmentRect(
+            forGlyphAt: glyphRange.location,
+            effectiveRange: nil
+        )
+        let glyphPosition = layoutManager.location(forGlyphAt: glyphRange.location)
+        let bounds = attachment.attachmentBounds(
+            for: textContainer,
+            proposedLineFragment: lineFragment,
+            glyphPosition: glyphPosition,
+            characterIndex: charIndex
+        )
+        let lineY = max(lastObservedLineFragmentMinY ?? lineFragment.minY, lineFragment.minY)
         return NSRect(
-            x: targetRect.midX - (fittedWidth / 2),
-            y: targetRect.midY - (fittedHeight / 2),
-            width: fittedWidth,
-            height: fittedHeight
+            x: fallbackFrame.minX,
+            y: lineY + lineFragment.height - (bounds.height / 2),
+            width: bounds.width,
+            height: bounds.height
         ).integral
+    }
+
+    private func drawAttachmentImage(_ attachment: MarkdownImageAttachment?, frame: NSRect, in controlView: NSView?) {
+        guard let attachment else { return }
+        attachment.didDraw(in: controlView)
+        attachment.drawAttachmentContents(in: frame.integral)
     }
 }
 

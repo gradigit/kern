@@ -48,11 +48,13 @@ final class NativeEditorSnapshotTests: XCTestCase {
 
         try withNativeEditorDefaults(profile: .gfmDefault) {
             try withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .aqua)
+                applySnapshotTheme(for: appearance)
                 let fixture = try loadFixture(name: "basic.in.md")
                 let view = makeSnapshotView(
                     fixture: fixture,
                     size: NSSize(width: 900, height: 650),
-                    appearance: .init(named: .aqua)
+                    appearance: appearance
                 )
                 assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
@@ -65,11 +67,13 @@ final class NativeEditorSnapshotTests: XCTestCase {
 
         try withNativeEditorDefaults(profile: .kernExtensions) {
             try withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .darkAqua)
+                applySnapshotTheme(for: appearance)
                 let fixture = try loadFixture(name: "extensions.in.md")
                 let view = makeSnapshotView(
                     fixture: fixture,
                     size: NSSize(width: 900, height: 650),
-                    appearance: .init(named: .darkAqua)
+                    appearance: appearance
                 )
                 assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
@@ -82,11 +86,13 @@ final class NativeEditorSnapshotTests: XCTestCase {
 
         try withNativeEditorDefaults(profile: .gfmDefault) {
             try withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .aqua)
+                applySnapshotTheme(for: appearance)
                 let fixture = try loadFixture(name: "images.fixture.md")
                 let view = makeSnapshotView(
                     fixture: fixture,
                     size: NSSize(width: 960, height: 760),
-                    appearance: .init(named: .aqua)
+                    appearance: appearance
                 )
                 assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
@@ -99,11 +105,13 @@ final class NativeEditorSnapshotTests: XCTestCase {
 
         try withNativeEditorDefaults(profile: .gfmDefault) {
             try withSnapshotTesting(record: snapshotRecordMode) {
+                let appearance = NSAppearance(named: .darkAqua)
+                applySnapshotTheme(for: appearance)
                 let fixture = try loadFixture(name: "full-spec-visual.fixture.md")
                 let view = makeSnapshotView(
                     fixture: fixture,
                     size: NSSize(width: 980, height: 980),
-                    appearance: .init(named: .darkAqua)
+                    appearance: appearance
                 )
                 assertSnapshot(of: view, as: snapshotImageStrategy(size: view.bounds.size))
             }
@@ -120,12 +128,13 @@ final class NativeEditorSnapshotTests: XCTestCase {
             (.solarizedLight, .sourceSerif, .init(named: .aqua)),
         ]
 
-        try withSnapshotTesting(record: snapshotRecordMode) {
+        withSnapshotTesting(record: snapshotRecordMode) {
             for scenario in scenarios {
-                try withNativeEditorDefaults(profile: .gfmDefault) {
+                withNativeEditorDefaults(profile: .gfmDefault) {
                     let defaults = UserDefaults.standard
                     defaults.set(scenario.theme.rawValue, forKey: NativeEditorAppearance.themeModeKey)
                     defaults.set(scenario.family.rawValue, forKey: NativeEditorAppearance.fontFamilyKey)
+                    NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
 
                     let view = makeSnapshotView(
                         fixture: fixture,
@@ -213,6 +222,7 @@ final class NativeEditorSnapshotTests: XCTestCase {
                         let loaded = try loadFixture(name: fixture)
 
                         for (appearanceName, appearance) in appearances {
+                            applySnapshotTheme(for: appearance)
                             for (sizeName, size) in sizes {
                                 let view = makeSnapshotView(
                                     fixture: loaded,
@@ -248,19 +258,72 @@ final class NativeEditorSnapshotTests: XCTestCase {
     }
 
     private func snapshotImageStrategy(size: CGSize) -> Snapshotting<NSView, SnapshotPNG> {
-        let base = Snapshotting<NSView, NSImage>.image(size: size)
         return Snapshotting<NSView, SnapshotPNG>(
-            pathExtension: base.pathExtension,
+            pathExtension: "png",
             diffing: normalizedImageDiffing()
         ) { view in
-            base.snapshot(view).map { image in
-                let normalized = Self.normalizedSnapshotImage(image)
-                return SnapshotPNG(
-                    image: normalized,
-                    data: Self.pngData(for: normalized) ?? Data()
-                )
+            let image: NSImage
+            if Thread.isMainThread {
+                image = MainActor.assumeIsolated {
+                    Self.renderSnapshotImage(view: view, size: size)
+                }
+            } else {
+                var rendered: NSImage?
+                DispatchQueue.main.sync {
+                    rendered = MainActor.assumeIsolated {
+                        Self.renderSnapshotImage(view: view, size: size)
+                    }
+                }
+                image = rendered ?? NSImage(size: size)
             }
+
+            let normalized = Self.normalizedSnapshotImage(image)
+            return SnapshotPNG(
+                image: normalized,
+                data: Self.pngData(for: normalized) ?? Data()
+            )
         }
+    }
+
+    @MainActor
+    private static func renderSnapshotImage(view: NSView, size: CGSize) -> NSImage {
+        let initialSize = view.frame.size
+        let scale: CGFloat = 2
+        let renderSize = NSSize(
+            width: max(1, size.width.rounded(.toNearestOrAwayFromZero)),
+            height: max(1, size.height.rounded(.toNearestOrAwayFromZero))
+        )
+        view.frame.size = renderSize
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+
+        let pixelsWide = max(1, Int((renderSize.width * scale).rounded(.toNearestOrAwayFromZero)))
+        let pixelsHigh = max(1, Int((renderSize.height * scale).rounded(.toNearestOrAwayFromZero)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+        else {
+            view.frame.size = initialSize
+            return NSImage(size: renderSize)
+        }
+
+        bitmap.size = renderSize
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        view.frame.size = initialSize
+
+        let image = NSImage(size: renderSize)
+        image.addRepresentation(bitmap)
+        return image
     }
 
     private func normalizedImageDiffing() -> Diffing<SnapshotPNG> {
@@ -615,6 +678,19 @@ final class NativeEditorSnapshotTests: XCTestCase {
         NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
 
         try f()
+    }
+
+    @MainActor
+    private func applySnapshotTheme(for appearance: NSAppearance?) {
+        let theme: NativeEditorThemeMode
+        if let appearance,
+           appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            theme = .kernDark
+        } else {
+            theme = .kernLight
+        }
+        UserDefaults.standard.set(theme.rawValue, forKey: NativeEditorAppearance.themeModeKey)
+        NotificationCenter.default.post(name: .nativeEditorPreferencesDidChange, object: nil)
     }
 
     // MARK: - Fixtures

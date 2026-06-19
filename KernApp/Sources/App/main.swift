@@ -43,6 +43,7 @@ if isUITesting {
     if let v = env["KERN_NATIVE_MERMAID_RENDER_MODE"] { overrides["nativeEditor.mermaidRenderMode"] = v } // rich | ascii | auto
     if let v = env["KERN_NATIVE_MERMAID_AUTO_ASCII_THRESHOLD"] { overrides["nativeEditor.mermaidAutoAsciiThreshold"] = v }
     if let v = env["KERN_NATIVE_CHECKBOX_HIT_TARGET"] { overrides["nativeEditor.checkboxHitTarget"] = v } // glyph | marker
+    if let v = env["KERN_NATIVE_THEME"] { overrides["nativeEditor.themeMode"] = v }
 
     // Use NSArgumentDomain (highest-precedence, in-memory) so overrides win over any persisted defaults
     // without mutating the developer's preferences on disk.
@@ -98,6 +99,9 @@ if isUITesting {
     if let v = env["KERN_NATIVE_CHECKBOX_HIT_TARGET"] {
         UserDefaults.standard.set(v, forKey: "nativeEditor.checkboxHitTarget") // glyph | marker
     }
+    if let v = env["KERN_NATIVE_THEME"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.themeMode")
+    }
 }
 
 // Swizzle AX bundle loading to background thread (saves 10-30ms on main thread)
@@ -111,6 +115,9 @@ let _ = KernDocumentController()
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.activate(ignoringOtherApps: true)
+let suppressActivation = env["KERN_SUPPRESS_ACTIVATION"] == "1" || CommandLine.arguments.contains("--kern-background")
+app.setActivationPolicy(suppressActivation ? .accessory : .regular)
+if !suppressActivation {
+    app.activate(ignoringOtherApps: true)
+}
 app.run()

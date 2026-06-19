@@ -15,6 +15,8 @@ extension NSAttributedString.Key {
     static let kernListDepth = NSAttributedString.Key("kern.listDepth") // Int (nesting depth for rendering)
     static let kernMarkerAdvance = NSAttributedString.Key("kern.markerAdvance") // CGFloat (precomputed visible marker width for wrapped-line alignment)
     static let kernQuoteDepth = NSAttributedString.Key("kern.quoteDepth") // Int
+    static let kernCalloutKind = NSAttributedString.Key("kern.calloutKind") // String (note | tip | warning | ...)
+    static let kernCalloutFoldSuffix = NSAttributedString.Key("kern.calloutFoldSuffix") // String ("+" | "-")
 
     static let kernStrong = NSAttributedString.Key("kern.strong") // Bool
     static let kernEmphasis = NSAttributedString.Key("kern.emphasis") // Bool
@@ -79,4 +81,47 @@ enum KernTaskStyle: Int {
     case standalone = 0
     /// `- [ ] text` (GFM task list item), may render with or without a bullet depending on preferences.
     case bulleted = 1
+}
+
+enum KernCalloutKind: String, CaseIterable {
+    case note
+    case tip
+    case success
+    case warning
+    case caution
+    case important
+
+    var markdownName: String {
+        switch self {
+        case .note: return "NOTE"
+        case .tip: return "TIP"
+        case .success: return "SUCCESS"
+        case .warning: return "WARNING"
+        case .caution: return "CAUTION"
+        case .important: return "IMPORTANT"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .note: return "ℹ"
+        case .tip: return "💡"
+        case .success: return "✓"
+        case .warning: return "!"
+        case .caution: return "⚠"
+        case .important: return "◆"
+        }
+    }
+
+    static func normalized(from raw: String) -> KernCalloutKind? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "note", "info": return .note
+        case "tip", "hint": return .tip
+        case "success", "done", "check": return .success
+        case "warning", "warn", "attention": return .warning
+        case "caution", "danger", "error": return .caution
+        case "important": return .important
+        default: return nil
+        }
+    }
 }

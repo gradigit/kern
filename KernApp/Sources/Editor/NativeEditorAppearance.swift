@@ -5,14 +5,26 @@ enum NativeEditorThemeMode: String, CaseIterable {
     case system
     case kernDark
     case kernLight
+    case turbodraftDark
+    case turbodraftLight
+    case turbodraftIce
+    case oneDark
     case githubDark
     case githubLight
     case dracula
     case solarizedDark
     case solarizedLight
     case nordDark
+    case tokyoNight
+    case rosePine
     case gruvboxDark
+    case gruvboxLight
     case catppuccinMocha
+    case catppuccinLatte
+    case monokaiPro
+    case materialDark
+    case vscodeDarkPlus
+    case sublimeMariana
     case custom
 }
 
@@ -140,11 +152,75 @@ enum NativeEditorAppearance {
 
     private struct ThemePalette {
         let preferredAppearance: NSAppearance.Name?
+        let editorBackground: NSColor
+        let sidebarBackground: NSColor
         let textColor: NSColor
+        let secondaryTextColor: NSColor
         let linkColor: NSColor
         let codeBlockBackground: NSColor
         let codeBlockStroke: NSColor
         let inlineCodeBackground: NSColor
+        let inlineCodeText: NSColor
+        let tableHeaderBackground: NSColor
+        let quoteBar: NSColor
+        let quoteFill: NSColor
+        let syntax: SyntaxPalette
+
+        init(
+            preferredAppearance: NSAppearance.Name?,
+            editorBackground: NSColor? = nil,
+            sidebarBackground: NSColor? = nil,
+            textColor: NSColor,
+            secondaryTextColor: NSColor? = nil,
+            linkColor: NSColor,
+            codeBlockBackground: NSColor,
+            codeBlockStroke: NSColor,
+            inlineCodeBackground: NSColor,
+            inlineCodeText: NSColor? = nil,
+            tableHeaderBackground: NSColor? = nil,
+            quoteBar: NSColor? = nil,
+            quoteFill: NSColor? = nil,
+            syntax: SyntaxPalette? = nil
+        ) {
+            self.preferredAppearance = preferredAppearance
+            self.editorBackground = editorBackground ?? .textBackgroundColor
+            self.sidebarBackground = sidebarBackground ?? .controlBackgroundColor
+            self.textColor = textColor
+            self.secondaryTextColor = secondaryTextColor ?? .secondaryLabelColor
+            self.linkColor = linkColor
+            self.codeBlockBackground = codeBlockBackground
+            self.codeBlockStroke = codeBlockStroke
+            self.inlineCodeBackground = inlineCodeBackground
+            self.inlineCodeText = inlineCodeText ?? textColor
+            self.tableHeaderBackground = tableHeaderBackground ?? codeBlockBackground.withAlphaComponent(max(0.04, min(1.0, codeBlockBackground.alphaComponent)))
+            self.quoteBar = quoteBar ?? .separatorColor
+            self.quoteFill = quoteFill ?? codeBlockBackground.withAlphaComponent(max(0.08, min(0.18, codeBlockBackground.alphaComponent)))
+            self.syntax = syntax ?? SyntaxPalette.defaultPalette
+        }
+    }
+
+    struct SyntaxPalette {
+        let keyword: NSColor
+        let builtin: NSColor
+        let string: NSColor
+        let number: NSColor
+        let comment: NSColor
+        let variable: NSColor
+
+        static let defaultPalette = SyntaxPalette(
+            keyword: .systemBlue,
+            builtin: .systemTeal,
+            string: .systemRed,
+            number: .systemPurple,
+            comment: .secondaryLabelColor,
+            variable: .systemOrange
+        )
+    }
+
+    struct CalloutStyle {
+        let fill: NSColor
+        let stroke: NSColor
+        let accent: NSColor
     }
 
     private struct ThemePreset {
@@ -160,6 +236,66 @@ enum NativeEditorAppearance {
         let defaultLightBg = NSColor(white: 0.0, alpha: 0.08)
         let defaultLightStroke = NSColor(white: 0.0, alpha: 0.10)
         let defaultLightInline = NSColor(white: 0.0, alpha: 0.08)
+        func hex(_ raw: String) -> NSColor {
+            NativeEditorAppearance.colorFromHex(raw) ?? .labelColor
+        }
+        func hexA(_ raw: String, _ alpha: CGFloat) -> NSColor {
+            hex(raw).withAlphaComponent(alpha)
+        }
+        func importedTheme(
+            title: String,
+            mode: NativeEditorThemeMode,
+            dark: Bool,
+            background: String,
+            foreground: String,
+            heading: String,
+            code: String,
+            codeBackground: String,
+            inlineCodeBackground: String,
+            link: String,
+            quote: String,
+            secondary: String,
+            highlight: String,
+            marker: String? = nil
+        ) -> ThemePreset {
+            let bg = hex(background)
+            let fg = hex(foreground)
+            let headingColor = hex(heading)
+            let codeColor = hex(code)
+            let codeBg = hex(codeBackground)
+            let inlineBg = hex(inlineCodeBackground)
+            let linkColor = hex(link)
+            let quoteColor = hex(quote)
+            let secondaryColor = hex(secondary)
+            let markerColor = marker.map(hex) ?? secondaryColor
+            return ThemePreset(
+                title: title,
+                mode: mode,
+                palette: ThemePalette(
+                    preferredAppearance: dark ? .darkAqua : .aqua,
+                    editorBackground: bg,
+                    sidebarBackground: dark ? codeBg : bg.blended(withFraction: 0.45, of: codeBg) ?? codeBg,
+                    textColor: fg,
+                    secondaryTextColor: secondaryColor,
+                    linkColor: linkColor,
+                    codeBlockBackground: codeBg,
+                    codeBlockStroke: markerColor.withAlphaComponent(dark ? 0.65 : 0.55),
+                    inlineCodeBackground: inlineBg,
+                    inlineCodeText: codeColor,
+                    tableHeaderBackground: codeBg.blended(withFraction: dark ? 0.18 : 0.08, of: fg) ?? codeBg,
+                    quoteBar: quoteColor,
+                    quoteFill: quoteColor.withAlphaComponent(dark ? 0.13 : 0.10),
+                    syntax: SyntaxPalette(
+                        keyword: headingColor,
+                        builtin: linkColor,
+                        string: codeColor,
+                        number: hex(highlight),
+                        comment: quoteColor,
+                        variable: dark ? hexA(highlight, 0.92) : headingColor
+                    )
+                )
+            )
+        }
 
         return [
             .kernDark: ThemePreset(
@@ -186,16 +322,51 @@ enum NativeEditorAppearance {
                     inlineCodeBackground: defaultLightInline
                 )
             ),
+            .turbodraftDark: importedTheme(
+                title: "TurboDraft Dark", mode: .turbodraftDark, dark: true,
+                background: "1d1f21", foreground: "c5c9c6", heading: "e0e2e0",
+                code: "c5c9c6", codeBackground: "222425", inlineCodeBackground: "272829",
+                link: "60a5fa", quote: "8a8d8a", secondary: "707272", highlight: "60a5fa",
+                marker: "454749"
+            ),
+            .turbodraftLight: importedTheme(
+                title: "TurboDraft Light", mode: .turbodraftLight, dark: false,
+                background: "f5f6f6", foreground: "424242", heading: "1a1a1a",
+                code: "424242", codeBackground: "eaecec", inlineCodeBackground: "e4e6e6",
+                link: "1088c8", quote: "686a6c", secondary: "888a8c", highlight: "1088c8",
+                marker: "c4c6c8"
+            ),
+            .turbodraftIce: importedTheme(
+                title: "TurboDraft Ice", mode: .turbodraftIce, dark: true,
+                background: "09090b", foreground: "e4e6ea", heading: "93c5fd",
+                code: "7dd3fc", codeBackground: "050507", inlineCodeBackground: "111114",
+                link: "60a5fa", quote: "8a8a94", secondary: "52525b", highlight: "93c5fd",
+                marker: "27272a"
+            ),
+            .oneDark: importedTheme(
+                title: "One Dark", mode: .oneDark, dark: true,
+                background: "282c34", foreground: "abb2bf", heading: "e5c07b",
+                code: "98c379", codeBackground: "21252b", inlineCodeBackground: "2c313a",
+                link: "61afef", quote: "8b929e", secondary: "8b929e", highlight: "e5c07b",
+                marker: "5c6370"
+            ),
             .githubDark: ThemePreset(
                 title: "GitHub Dark",
                 mode: .githubDark,
                 palette: ThemePalette(
                     preferredAppearance: .darkAqua,
+                    editorBackground: hex("0d1117"),
+                    sidebarBackground: hex("161b22"),
                     textColor: NSColor(calibratedWhite: 0.92, alpha: 1.0),
+                    secondaryTextColor: hex("8b949e"),
                     linkColor: NSColor(calibratedRed: 0.35, green: 0.67, blue: 1.0, alpha: 1.0),
                     codeBlockBackground: NSColor(calibratedWhite: 1.0, alpha: 0.10),
                     codeBlockStroke: NSColor(calibratedWhite: 1.0, alpha: 0.16),
-                    inlineCodeBackground: NSColor(calibratedWhite: 1.0, alpha: 0.14)
+                    inlineCodeBackground: NSColor(calibratedWhite: 1.0, alpha: 0.14),
+                    inlineCodeText: hex("a5d6ff"),
+                    tableHeaderBackground: hex("161b22"),
+                    quoteBar: hex("8b949e"),
+                    quoteFill: hexA("8b949e", 0.12)
                 )
             ),
             .githubLight: ThemePreset(
@@ -203,11 +374,18 @@ enum NativeEditorAppearance {
                 mode: .githubLight,
                 palette: ThemePalette(
                     preferredAppearance: .aqua,
+                    editorBackground: hex("ffffff"),
+                    sidebarBackground: hex("f6f8fa"),
                     textColor: NSColor(calibratedRed: 0.15, green: 0.17, blue: 0.20, alpha: 1.0),
+                    secondaryTextColor: hex("57606a"),
                     linkColor: NSColor(calibratedRed: 0.03, green: 0.36, blue: 0.84, alpha: 1.0),
                     codeBlockBackground: NSColor(calibratedRed: 0.95, green: 0.96, blue: 0.97, alpha: 1.0),
                     codeBlockStroke: NSColor(calibratedRed: 0.88, green: 0.89, blue: 0.90, alpha: 1.0),
-                    inlineCodeBackground: NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.95, alpha: 1.0)
+                    inlineCodeBackground: NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.95, alpha: 1.0),
+                    inlineCodeText: hex("0a3069"),
+                    tableHeaderBackground: hex("f6f8fa"),
+                    quoteBar: hex("57606a"),
+                    quoteFill: hexA("57606a", 0.09)
                 )
             ),
             .dracula: ThemePreset(
@@ -282,6 +460,62 @@ enum NativeEditorAppearance {
                     inlineCodeBackground: NSColor(calibratedRed: 0.23, green: 0.24, blue: 0.33, alpha: 1.0)
                 )
             ),
+            .catppuccinLatte: importedTheme(
+                title: "Catppuccin Latte", mode: .catppuccinLatte, dark: false,
+                background: "eff1f5", foreground: "4c4f69", heading: "1e66f5",
+                code: "40a02b", codeBackground: "e6e9ef", inlineCodeBackground: "dce0e8",
+                link: "1e66f5", quote: "6c6f85", secondary: "6c6f85", highlight: "df8e1d",
+                marker: "9ca0b0"
+            ),
+            .tokyoNight: importedTheme(
+                title: "Tokyo Night", mode: .tokyoNight, dark: true,
+                background: "1a1b26", foreground: "a9b1d6", heading: "7aa2f7",
+                code: "9ece6a", codeBackground: "16161e", inlineCodeBackground: "232433",
+                link: "7dcfff", quote: "9099b7", secondary: "9099b7", highlight: "e0af68",
+                marker: "565f89"
+            ),
+            .rosePine: importedTheme(
+                title: "Rose Pine", mode: .rosePine, dark: true,
+                background: "191724", foreground: "e0def4", heading: "c4a7e7",
+                code: "9ccfd8", codeBackground: "1f1d2e", inlineCodeBackground: "26233a",
+                link: "ebbcba", quote: "b4b1cc", secondary: "b4b1cc", highlight: "f6c177",
+                marker: "6e6a86"
+            ),
+            .gruvboxLight: importedTheme(
+                title: "Gruvbox Light", mode: .gruvboxLight, dark: false,
+                background: "fbf1c7", foreground: "3c3836", heading: "d79921",
+                code: "79740e", codeBackground: "f2e5bc", inlineCodeBackground: "ebdbb2",
+                link: "458588", quote: "504945", secondary: "504945", highlight: "d79921",
+                marker: "928374"
+            ),
+            .monokaiPro: importedTheme(
+                title: "Monokai Pro", mode: .monokaiPro, dark: true,
+                background: "2d2a2e", foreground: "fcfcfa", heading: "ffd866",
+                code: "a9dc76", codeBackground: "221f22", inlineCodeBackground: "3a373b",
+                link: "78dce8", quote: "c1c0c0", secondary: "c1c0c0", highlight: "ffd866",
+                marker: "727072"
+            ),
+            .materialDark: importedTheme(
+                title: "Material Dark", mode: .materialDark, dark: true,
+                background: "212121", foreground: "eeffff", heading: "c792ea",
+                code: "c3e88d", codeBackground: "1a1a1a", inlineCodeBackground: "2c2c2c",
+                link: "82aaff", quote: "b0bec5", secondary: "b0bec5", highlight: "ffcb6b",
+                marker: "545454"
+            ),
+            .vscodeDarkPlus: importedTheme(
+                title: "VS Code Dark+", mode: .vscodeDarkPlus, dark: true,
+                background: "1e1e1e", foreground: "d4d4d4", heading: "569cd6",
+                code: "ce9178", codeBackground: "1a1a1a", inlineCodeBackground: "2d2d2d",
+                link: "4ec9b0", quote: "9e9e9e", secondary: "9e9e9e", highlight: "dcdcaa",
+                marker: "808080"
+            ),
+            .sublimeMariana: importedTheme(
+                title: "Sublime Mariana", mode: .sublimeMariana, dark: true,
+                background: "303841", foreground: "d8dee9", heading: "ee932b",
+                code: "99c794", codeBackground: "272d35", inlineCodeBackground: "3c444e",
+                link: "6699cc", quote: "a6acb5", secondary: "a6acb5", highlight: "fac761",
+                marker: "6d7a8a"
+            ),
         ]
     }()
 
@@ -290,14 +524,26 @@ enum NativeEditorAppearance {
             ("System", NativeEditorThemeMode.system.rawValue),
             ("Kern Dark", NativeEditorThemeMode.kernDark.rawValue),
             ("Kern Light", NativeEditorThemeMode.kernLight.rawValue),
+            ("TurboDraft Dark", NativeEditorThemeMode.turbodraftDark.rawValue),
+            ("TurboDraft Light", NativeEditorThemeMode.turbodraftLight.rawValue),
+            ("TurboDraft Ice", NativeEditorThemeMode.turbodraftIce.rawValue),
+            ("One Dark", NativeEditorThemeMode.oneDark.rawValue),
             ("GitHub Dark", NativeEditorThemeMode.githubDark.rawValue),
             ("GitHub Light", NativeEditorThemeMode.githubLight.rawValue),
             ("Dracula", NativeEditorThemeMode.dracula.rawValue),
             ("Solarized Dark", NativeEditorThemeMode.solarizedDark.rawValue),
             ("Solarized Light", NativeEditorThemeMode.solarizedLight.rawValue),
             ("Nord Dark", NativeEditorThemeMode.nordDark.rawValue),
+            ("Tokyo Night", NativeEditorThemeMode.tokyoNight.rawValue),
+            ("Rose Pine", NativeEditorThemeMode.rosePine.rawValue),
             ("Gruvbox Dark", NativeEditorThemeMode.gruvboxDark.rawValue),
+            ("Gruvbox Light", NativeEditorThemeMode.gruvboxLight.rawValue),
             ("Catppuccin Mocha", NativeEditorThemeMode.catppuccinMocha.rawValue),
+            ("Catppuccin Latte", NativeEditorThemeMode.catppuccinLatte.rawValue),
+            ("Monokai Pro", NativeEditorThemeMode.monokaiPro.rawValue),
+            ("Material Dark", NativeEditorThemeMode.materialDark.rawValue),
+            ("VS Code Dark+", NativeEditorThemeMode.vscodeDarkPlus.rawValue),
+            ("Sublime Mariana", NativeEditorThemeMode.sublimeMariana.rawValue),
             ("Custom Theme JSON", NativeEditorThemeMode.custom.rawValue),
         ]
     }
@@ -416,8 +662,24 @@ enum NativeEditorAppearance {
         resolvedThemePalette(defaults: defaults).textColor
     }
 
+    static func secondaryTextColor(defaults: UserDefaults = .standard) -> NSColor {
+        resolvedThemePalette(defaults: defaults).secondaryTextColor
+    }
+
     static func linkColor(defaults: UserDefaults = .standard) -> NSColor {
         resolvedThemePalette(defaults: defaults).linkColor
+    }
+
+    static func editorBackgroundColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).editorBackground
+    }
+
+    static func sidebarBackgroundColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).sidebarBackground
+    }
+
+    static func inlineCodeTextColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).inlineCodeText
     }
 
     static func inlineCodeBackgroundColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
@@ -433,6 +695,46 @@ enum NativeEditorAppearance {
     static func codeBlockStrokeColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
         let palette = resolvedThemePalette(defaults: defaults, appearance: appearance)
         return palette.codeBlockStroke
+    }
+
+    static func tableHeaderBackgroundColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).tableHeaderBackground
+    }
+
+    static func quoteBarColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).quoteBar
+    }
+
+    static func quoteFillColor(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> NSColor {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).quoteFill
+    }
+
+    static func syntaxPalette(defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> SyntaxPalette {
+        resolvedThemePalette(defaults: defaults, appearance: appearance).syntax
+    }
+
+    static func calloutStyle(kind: KernCalloutKind, defaults: UserDefaults = .standard, appearance: NSAppearance? = nil) -> CalloutStyle {
+        let palette = resolvedThemePalette(defaults: defaults, appearance: appearance)
+        let base: NSColor
+        switch kind {
+        case .note:
+            base = palette.linkColor
+        case .tip:
+            base = palette.syntax.builtin
+        case .success:
+            base = NSColor.systemGreen
+        case .warning:
+            base = NSColor.systemYellow
+        case .caution:
+            base = NSColor.systemRed
+        case .important:
+            base = palette.syntax.keyword
+        }
+        return CalloutStyle(
+            fill: base.withAlphaComponent(isDarkAppearance(appearance) ? 0.16 : 0.11),
+            stroke: base.withAlphaComponent(isDarkAppearance(appearance) ? 0.30 : 0.22),
+            accent: base
+        )
     }
 
     static func appearanceCacheSignature(defaults: UserDefaults = .standard) -> String {
@@ -541,11 +843,19 @@ enum NativeEditorAppearance {
 
             return ThemePalette(
                 preferredAppearance: custom.preferredAppearanceName,
+                editorBackground: basePalette.editorBackground,
+                sidebarBackground: basePalette.sidebarBackground,
                 textColor: colorFromHex(custom.textColor) ?? basePalette.textColor,
+                secondaryTextColor: basePalette.secondaryTextColor,
                 linkColor: colorFromHex(custom.linkColor) ?? basePalette.linkColor,
                 codeBlockBackground: colorFromHex(custom.codeBlockBackground) ?? basePalette.codeBlockBackground,
                 codeBlockStroke: colorFromHex(custom.codeBlockStroke) ?? basePalette.codeBlockStroke,
-                inlineCodeBackground: colorFromHex(custom.inlineCodeBackground) ?? basePalette.inlineCodeBackground
+                inlineCodeBackground: colorFromHex(custom.inlineCodeBackground) ?? basePalette.inlineCodeBackground,
+                inlineCodeText: basePalette.inlineCodeText,
+                tableHeaderBackground: basePalette.tableHeaderBackground,
+                quoteBar: basePalette.quoteBar,
+                quoteFill: basePalette.quoteFill,
+                syntax: basePalette.syntax
             )
         }
 
@@ -563,6 +873,8 @@ enum NativeEditorAppearance {
     private static func dynamicSystemPalette(appearance: NSAppearance?) -> ThemePalette {
         let dynamicText = NSColor.labelColor
         let dynamicLink = NSColor.linkColor
+        let dynamicEditorBackground = NSColor.textBackgroundColor
+        let dynamicSidebarBackground = NSColor.controlBackgroundColor
 
         let dynamicCodeBlockBg = NSColor(name: nil) { resolvedAppearance in
             switch resolvedAppearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]) {
@@ -590,40 +902,66 @@ enum NativeEditorAppearance {
                 return NSColor(white: 0.0, alpha: 0.08)
             }
         }
+        let dynamicTableHeaderBg = NSColor(name: nil) { resolvedAppearance in
+            switch resolvedAppearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]) {
+            case .darkAqua, .vibrantDark:
+                return NSColor(white: 1, alpha: 0.07)
+            default:
+                return NSColor(white: 0, alpha: 0.04)
+            }
+        }
 
         guard let appearance else {
             return ThemePalette(
                 preferredAppearance: nil,
+                editorBackground: dynamicEditorBackground,
+                sidebarBackground: dynamicSidebarBackground,
                 textColor: dynamicText,
                 linkColor: dynamicLink,
                 codeBlockBackground: dynamicCodeBlockBg,
                 codeBlockStroke: dynamicCodeBlockStroke,
-                inlineCodeBackground: dynamicInlineCodeBg
+                inlineCodeBackground: dynamicInlineCodeBg,
+                tableHeaderBackground: dynamicTableHeaderBg
             )
         }
 
+        var editorBackground = dynamicEditorBackground
+        var sidebarBackground = dynamicSidebarBackground
         var textColor = dynamicText
         var linkColor = dynamicLink
         var codeBlockBackground = dynamicCodeBlockBg
         var codeBlockStroke = dynamicCodeBlockStroke
         var inlineCodeBackground = dynamicInlineCodeBg
+        var tableHeaderBackground = dynamicTableHeaderBg
 
         appearance.performAsCurrentDrawingAppearance {
+            editorBackground = dynamicEditorBackground.usingColorSpace(.deviceRGB) ?? dynamicEditorBackground
+            sidebarBackground = dynamicSidebarBackground.usingColorSpace(.deviceRGB) ?? dynamicSidebarBackground
             textColor = dynamicText.usingColorSpace(.deviceRGB) ?? dynamicText
             linkColor = dynamicLink.usingColorSpace(.deviceRGB) ?? dynamicLink
             codeBlockBackground = dynamicCodeBlockBg.usingColorSpace(.deviceRGB) ?? dynamicCodeBlockBg
             codeBlockStroke = dynamicCodeBlockStroke.usingColorSpace(.deviceRGB) ?? dynamicCodeBlockStroke
             inlineCodeBackground = dynamicInlineCodeBg.usingColorSpace(.deviceRGB) ?? dynamicInlineCodeBg
+            tableHeaderBackground = dynamicTableHeaderBg.usingColorSpace(.deviceRGB) ?? dynamicTableHeaderBg
         }
 
         return ThemePalette(
             preferredAppearance: nil,
+            editorBackground: editorBackground,
+            sidebarBackground: sidebarBackground,
             textColor: textColor,
             linkColor: linkColor,
             codeBlockBackground: codeBlockBackground,
             codeBlockStroke: codeBlockStroke,
-            inlineCodeBackground: inlineCodeBackground
+            inlineCodeBackground: inlineCodeBackground,
+            tableHeaderBackground: tableHeaderBackground
         )
+    }
+
+    private static func isDarkAppearance(_ appearance: NSAppearance?) -> Bool {
+        guard let candidate = appearance ?? NSAppearance(named: .aqua) else { return false }
+        let match = candidate.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight])
+        return match == .darkAqua || match == .vibrantDark
     }
 
     fileprivate static func colorFromHex(_ maybeHex: String?) -> NSColor? {

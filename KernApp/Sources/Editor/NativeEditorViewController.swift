@@ -857,6 +857,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         )
 
         view = container
+        applyThemeColorsToLoadedViews()
     }
 
     deinit {
@@ -949,13 +950,22 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     }
 
     private func scheduleHeadingOutlineRefresh() {
+        if isRunningKernPerformanceTests {
+            return
+        }
+
+        if !isRunningSynchronousEditorTests, headingOutlineRefreshWorkItem != nil {
+            return
+        }
+
         headingOutlineRefreshWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            self.headingOutlineRefreshWorkItem = nil
             self.rebuildHeadingOutlineFromStorage()
         }
         headingOutlineRefreshWorkItem = work
-        if isRunningUnderXCTest {
+        if isRunningSynchronousEditorTests {
             work.perform()
             return
         }
@@ -1157,9 +1167,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         // container has "infinite" height; without this, `usedRect(for:)` can under-report and clamp
         // scrolling (breaking anchor jumps on long docs).
         if canForceFullLayout, storage.length > 0 {
-            let lastChar = max(0, storage.length - 1)
-            let glyphRange = lm.glyphRange(forCharacterRange: NSRange(location: lastChar, length: 1), actualCharacterRange: nil)
-            lm.ensureLayout(forGlyphRange: glyphRange)
+            forceContiguousLayoutForSmallDocument(layoutManager: lm, textContainer: tc, storageLength: storage.length)
         } else if storage.length == 0 {
             lm.ensureLayout(for: tc)
         }
@@ -1182,8 +1190,36 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         }
     }
 
+    private func forceContiguousLayoutForSmallDocument(
+        layoutManager lm: NSLayoutManager,
+        textContainer tc: NSTextContainer,
+        storageLength: Int
+    ) {
+        guard storageLength > 0 else {
+            lm.ensureLayout(for: tc)
+            return
+        }
+
+        // Non-contiguous layout is essential for very large files, but on small attachment-heavy
+        // documents TextKit can otherwise leave image attachment line fragments overlapping following
+        // paragraphs during the first render pass. Temporarily force a contiguous pass, then restore
+        // the large-file setting after the layout cache is populated.
+        let previousAllowsNonContiguousLayout = lm.allowsNonContiguousLayout
+        lm.allowsNonContiguousLayout = false
+        defer { lm.allowsNonContiguousLayout = previousAllowsNonContiguousLayout }
+
+        let lastChar = max(0, storageLength - 1)
+        let glyphRange = lm.glyphRange(forCharacterRange: NSRange(location: lastChar, length: 1), actualCharacterRange: nil)
+        lm.ensureLayout(forGlyphRange: glyphRange)
+        lm.ensureLayout(for: tc)
+    }
+
     private func scheduleLargeDocumentLightLayoutIfNeeded(markdown: String) {
-        guard markdown.utf16.count > fullLayoutForceCharThreshold else {
+        scheduleLargeDocumentLightLayoutIfNeeded(storageLength: markdown.utf16.count)
+    }
+
+    private func scheduleLargeDocumentLightLayoutIfNeeded(storageLength: Int) {
+        guard storageLength > fullLayoutForceCharThreshold else {
             largeDocumentLightLayoutWorkItem?.cancel()
             largeDocumentLightLayoutWorkItem = nil
             return
@@ -1242,6 +1278,26 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
     private func applyThemeAppearanceFromPreferences() {
         NativeEditorAppearance.applyTheme(to: view.window)
+        applyThemeColorsToLoadedViews()
+    }
+
+    private func applyThemeColorsToLoadedViews() {
+        guard isViewLoaded else { return }
+        let appearance = view.window?.effectiveAppearance ?? view.effectiveAppearance
+        let editorBackground = NativeEditorAppearance.editorBackgroundColor(appearance: appearance)
+        let sidebarBackground = NativeEditorAppearance.sidebarBackgroundColor(appearance: appearance)
+        let secondary = NativeEditorAppearance.secondaryTextColor()
+
+        view.wantsLayer = true
+        view.layer?.backgroundColor = editorBackground.cgColor
+        scrollView.backgroundColor = editorBackground
+        scrollView.contentView.drawsBackground = true
+        scrollView.contentView.backgroundColor = editorBackground
+        textView.insertionPointColor = NativeEditorAppearance.linkColor()
+
+        headingOutlineContainer.layer?.backgroundColor = sidebarBackground.cgColor
+        headingOutlineHeaderLabel.textColor = secondary
+        headingOutlineTableView.backgroundColor = .clear
     }
 
     @objc private func nativeEditorPreferencesDidChange(_ notification: Notification) {
@@ -1317,6 +1373,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let scrollOrigin = preserveSelection ? scrollView.contentView.bounds.origin : nil
 
         let opt = NativeMarkdownCodec.Options.fromUserDefaults()
+        textView.layoutManager?.allowsNonContiguousLayout = markdown.utf16.count > fullLayoutForceCharThreshold
         let useStagedOpen = shouldUseStagedOpen(for: markdown)
         let deferSyntaxHighlightingDuringStagedOpen = useStagedOpen && shouldDeferSyntaxHighlightingDuringStagedOpen(
             markdownUTF16Count: markdown.utf16.count,
@@ -5692,6 +5749,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             .kernCodeLanguage,
             .kernCodeBlockID,
             .kernQuoteDepth,
+            .kernCalloutKind,
+            .kernCalloutFoldSuffix,
         ]
         for key in blockKeys {
             attributed.removeAttribute(key, range: full)
@@ -5864,6 +5923,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             if code {
                 font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
                 background = NativeEditorAppearance.inlineCodeBackgroundColor()
+                storage.addAttribute(.foregroundColor, value: NativeEditorAppearance.inlineCodeTextColor(), range: subrange)
             } else {
                 if strong {
                     font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
@@ -5871,6 +5931,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
                 if emphasis {
                     font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
                 }
+                storage.addAttribute(.foregroundColor, value: NativeEditorAppearance.primaryTextColor(), range: subrange)
             }
 
             storage.addAttribute(.font, value: font, range: subrange)
@@ -6144,7 +6205,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         findUpdateWorkItem = workItem
 
         // Keep typing responsive in-app while making unit/snapshot runs deterministic and fast.
-        if isRunningUnderXCTest {
+        if isRunningSynchronousEditorTests {
             workItem.perform()
             return
         }
@@ -7861,6 +7922,43 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
 
 private var isRunningUnderXCTest: Bool {
     ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+}
+
+private var isRunningKernPerformanceTests: Bool {
+    kernRuntimeBool("KERN_ENABLE_PERF_TESTS")
+}
+
+private var isRunningSynchronousEditorTests: Bool {
+    isRunningUnderXCTest && !isRunningKernPerformanceTests
+}
+
+private func kernRuntimeBool(_ key: String, default defaultValue: Bool = false) -> Bool {
+    func parse(_ raw: String?) -> Bool? {
+        guard let raw else { return nil }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "y", "on":
+            return true
+        case "0", "false", "no", "n", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    if let value = parse(ProcessInfo.processInfo.environment[key]) {
+        return value
+    }
+
+    let suite = UserDefaults(suiteName: "com.gradigit.kern.tests")
+    if let value = parse(suite?.string(forKey: key)) {
+        return value
+    }
+    if let raw = suite?.object(forKey: key),
+       let value = parse(String(describing: raw)) {
+        return value
+    }
+
+    return defaultValue
 }
 
 // MARK: - NSMenuItemValidation

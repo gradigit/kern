@@ -679,6 +679,45 @@ enum NativeMarkdownCodec {
                 continue
             }
 
+            // Kern extension: callout blockquotes, authored with the widely used admonition form:
+            // > [!NOTE] Title
+            // > Body
+            if !options.strictConformanceRoundTripMode,
+               quoteDepth > 0,
+               let callout = parseCalloutMarker(line) {
+                profile(.paragraphFallbackBlock) {
+                    resetOrderedCounters()
+                    let paragraphBody = collectParagraphBody(
+                        startIndex: i,
+                        firstLine: callout.text,
+                        quoteDepth: quoteDepth
+                    )
+                    let j = paragraphBody.nextIndex
+                    let para = NSMutableAttributedString(attributedString: makeCalloutParagraph(
+                        kind: callout.kind,
+                        text: paragraphBody.combined,
+                        containsInlineSyntax: paragraphBody.containsInlineSyntax,
+                        baseFont: baseFont,
+                        ctx: ctx
+                    ))
+                    if let foldSuffix = callout.foldSuffix, para.length > 0 {
+                        let firstParagraph = (para.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0))
+                        para.addAttribute(
+                            .kernCalloutFoldSuffix,
+                            value: foldSuffix,
+                            range: NSRange(location: 0, length: min(para.length, firstParagraph.length))
+                        )
+                    }
+                    applyQuoteAttributes(para, quoteDepth: quoteDepth)
+                    result.append(para)
+                    if j - 1 < lines.count - 1 {
+                        result.append(plainNewline)
+                    }
+                    i = j
+                }
+                continue
+            }
+
             // Fast path: overwhelmingly common paragraph lines in large documents.
             // Skip expensive block-detector chain when the current line cannot start
             // a non-paragraph block by marker shape.
@@ -1646,6 +1685,29 @@ enum NativeMarkdownCodec {
                 }
             }
 
+            if kind == .paragraph,
+               para.attribute(.kernCalloutKind, at: 0, effectiveRange: nil) as? String != nil {
+                let initialQuoteDepth = (para.attribute(.kernQuoteDepth, at: 0, effectiveRange: nil) as? Int) ?? 0
+                var lines = [exportParagraph(para, options: options)]
+                var j = paraRange.location + paraRange.length
+                while j < ns.length {
+                    let r = ns.paragraphRange(for: NSRange(location: j, length: 0))
+                    let p = attributed.attributedSubstring(from: r)
+                    guard p.length > 0 else { break }
+                    let kRaw = p.attribute(.kernBlockKind, at: 0, effectiveRange: nil) as? Int
+                    let k = KernBlockKind(rawValue: kRaw ?? KernBlockKind.paragraph.rawValue) ?? .paragraph
+                    guard k == .paragraph else { break }
+                    let quoteDepth = (p.attribute(.kernQuoteDepth, at: 0, effectiveRange: nil) as? Int) ?? 0
+                    guard quoteDepth == initialQuoteDepth else { break }
+                    if p.attribute(.kernCalloutKind, at: 0, effectiveRange: nil) as? String != nil { break }
+                    lines.append(exportParagraph(p, options: options))
+                    j = r.location + r.length
+                }
+                appendBlock(lines.joined(separator: "\n"), kind: .paragraph, quoteDepth: initialQuoteDepth)
+                idx = j
+                continue
+            }
+
             if kind == .tableCell {
                 let tableID = (para.attribute(.kernTableID, at: 0, effectiveRange: nil) as? Int) ?? -1
                 let exported = exportGfmTableBlock(attributed, ns: ns, startIndex: idx, tableID: tableID)
@@ -2064,16 +2126,6 @@ enum NativeMarkdownCodec {
         /// Line index after the table (does not consume the trailing blank line, if any).
         var endIndex: Int
     }
-
-    private static let tableHeaderBackgroundColor: NSColor = {
-        NSColor(name: NSColor.Name("kern.tableHeaderBackground")) { appearance in
-            let match = appearance.bestMatch(from: [.darkAqua, .aqua])
-            if match == .darkAqua {
-                return NSColor(white: 1, alpha: 0.07)
-            }
-            return NSColor(white: 0, alpha: 0.04)
-        }
-    }()
 
     /// Optional debug logging for table parsing. Evaluate once to avoid per-line env lookups.
     private static let debugTableParseEnabled: Bool = {
@@ -2597,7 +2649,7 @@ enum NativeMarkdownCodec {
         block.setWidth(1, type: .absoluteValueType, for: .border)
         block.setBorderColor(.separatorColor)
         if isHeader {
-            block.backgroundColor = tableHeaderBackgroundColor
+            block.backgroundColor = NativeEditorAppearance.tableHeaderBackgroundColor()
         }
 
         let style = NSMutableParagraphStyle()
@@ -2917,6 +2969,26 @@ enum NativeMarkdownCodec {
 
         guard depth > 0 else { return nil }
         return (depth: depth, text: String(line[idx...]))
+    }
+
+    private static func parseCalloutMarker(_ line: String) -> (kind: KernCalloutKind, foldSuffix: String?, text: String)? {
+        let trimmedLeading = line.trimmingCharacters(in: .whitespaces)
+        guard trimmedLeading.hasPrefix("[!") else { return nil }
+        guard let close = trimmedLeading.firstIndex(of: "]") else { return nil }
+
+        let rawKindStart = trimmedLeading.index(trimmedLeading.startIndex, offsetBy: 2)
+        let rawKind = String(trimmedLeading[rawKindStart..<close])
+        guard let kind = KernCalloutKind.normalized(from: rawKind) else { return nil }
+
+        var restStart = trimmedLeading.index(after: close)
+        var foldSuffix: String?
+        if restStart < trimmedLeading.endIndex,
+           trimmedLeading[restStart] == "+" || trimmedLeading[restStart] == "-" {
+            foldSuffix = String(trimmedLeading[restStart])
+            restStart = trimmedLeading.index(after: restStart)
+        }
+        let rest = String(trimmedLeading[restStart...]).trimmingCharacters(in: .whitespaces)
+        return (kind, foldSuffix, rest)
     }
 
     private struct FenceStart {
@@ -3344,6 +3416,41 @@ enum NativeMarkdownCodec {
 
     // MARK: - Block rendering
 
+    private static func makeCalloutParagraph(
+        kind: KernCalloutKind,
+        text: String,
+        containsInlineSyntax: Bool,
+        baseFont: NSFont,
+        ctx: ImportContext
+    ) -> NSAttributedString {
+        let para = NSMutableAttributedString()
+
+        var markerAttrs = baseAttributes(baseFont: baseFont)
+        markerAttrs[.kernMarker] = true
+        markerAttrs[.foregroundColor] = NativeEditorAppearance.calloutStyle(kind: kind).accent
+        markerAttrs[.font] = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold)
+        para.append(NSAttributedString(string: "\(kind.icon) ", attributes: markerAttrs))
+
+        let body = makeInlineContent(
+            text,
+            baseFont: baseFont,
+            containsInlineSyntax: containsInlineSyntax,
+            ctx: ctx
+        )
+        para.append(body)
+
+        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+        if para.length > 0 {
+            let firstParagraph = (para.string as NSString).paragraphRange(for: NSRange(location: 0, length: 0))
+            para.addAttribute(
+                .kernCalloutKind,
+                value: kind.rawValue,
+                range: NSRange(location: 0, length: min(para.length, firstParagraph.length))
+            )
+        }
+        return para
+    }
+
     private static func makeTaskParagraph(
         _ task: (style: KernTaskStyle, marker: Character?, markerPadding: String, checked: Bool, text: String),
         indent: Int,
@@ -3409,6 +3516,7 @@ enum NativeMarkdownCodec {
         let checkboxChar = checked ? "\u{2611}" : "\u{2610}"
         var checkboxAttrs = markerAttrs
         checkboxAttrs[.font] = checkboxFont
+        checkboxAttrs[.foregroundColor] = NSColor.clear
         checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: heading, checkboxFont: checkboxFont)
         checkboxAttrs[.kernCheckbox] = true
         checkboxAttrs[.kernCheckboxChecked] = checked
@@ -3654,12 +3762,13 @@ enum NativeMarkdownCodec {
         guard !lang.isEmpty else { return }
 
         let ns = attributed.string as NSString
-        let keywordColor = NSColor.systemBlue
-        let builtinColor = NSColor.systemTeal
-        let stringColor = NSColor.systemRed
-        let numberColor = NSColor.systemPurple
-        let commentColor = NSColor.secondaryLabelColor
-        let variableColor = NSColor.systemOrange
+        let syntax = NativeEditorAppearance.syntaxPalette()
+        let keywordColor = syntax.keyword
+        let builtinColor = syntax.builtin
+        let stringColor = syntax.string
+        let numberColor = syntax.number
+        let commentColor = syntax.comment
+        let variableColor = syntax.variable
 
         func apply(_ pattern: String, color: NSColor, options: NSRegularExpression.Options = []) {
             let cacheKey = pattern + "\0" + String(options.rawValue)
@@ -4022,6 +4131,7 @@ enum NativeMarkdownCodec {
         let checkboxChar = orderedTask.checked ? "\u{2611}" : "\u{2610}"
         var checkboxAttrs = markerAttrs
         checkboxAttrs[.font] = checkboxFont
+        checkboxAttrs[.foregroundColor] = NSColor.clear
         checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
         checkboxAttrs[.kernCheckbox] = true
         checkboxAttrs[.kernCheckboxChecked] = orderedTask.checked
@@ -4297,6 +4407,7 @@ enum NativeMarkdownCodec {
             let checkboxChar = checked ? "\u{2611}" : "\u{2610}"
             var checkboxAttrs = markerAttrs
             checkboxAttrs[.font] = checkboxFont
+            checkboxAttrs[.foregroundColor] = NSColor.clear
             checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
             checkboxAttrs[.kernCheckbox] = true
             checkboxAttrs[.kernCheckboxChecked] = checked
@@ -4309,6 +4420,7 @@ enum NativeMarkdownCodec {
             let checkboxChar = checked ? "\u{2611}" : "\u{2610}"
             var checkboxAttrs = markerAttrs
             checkboxAttrs[.font] = checkboxFont
+            checkboxAttrs[.foregroundColor] = NSColor.clear
             checkboxAttrs[.baselineOffset] = CheckboxStyle.baselineOffset(textFont: baseFont, checkboxFont: checkboxFont)
             checkboxAttrs[.kernCheckbox] = true
             checkboxAttrs[.kernCheckboxChecked] = checked
@@ -4455,6 +4567,7 @@ enum NativeMarkdownCodec {
         if style.code {
             attrs[.kernInlineCode] = true
             attrs[.backgroundColor] = NativeEditorAppearance.inlineCodeBackgroundColor()
+            attrs[.foregroundColor] = NativeEditorAppearance.inlineCodeTextColor()
         } else {
             if style.strong {
                 attrs[.kernStrong] = true
@@ -6346,7 +6459,24 @@ enum NativeMarkdownCodec {
             softBreakKind = .paragraph
 
         case .paragraph:
-            body = exportInline(content)
+            if let rawKind = paragraph.attribute(.kernCalloutKind, at: 0, effectiveRange: nil) as? String,
+               let calloutKind = KernCalloutKind(rawValue: rawKind) {
+                let exported = exportInline(content)
+                switch (options.exportDialect, options.gfmExtensionExportStrategy) {
+                case (.gfm, .portable), (.gfm, .lint):
+                    body = exported
+                default:
+                    let foldSuffix = paragraph.attribute(.kernCalloutFoldSuffix, at: 0, effectiveRange: nil) as? String
+                    let marker = "[!\(calloutKind.markdownName)]\(foldSuffix ?? "")"
+                    if exported.isEmpty {
+                        body = marker
+                    } else {
+                        body = marker + " " + exported
+                    }
+                }
+            } else {
+                body = exportInline(content)
+            }
             softBreakKind = .paragraph
         case .codeBlock:
             body = paraText

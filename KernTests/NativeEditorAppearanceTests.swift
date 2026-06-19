@@ -5,7 +5,10 @@ import XCTest
 final class NativeEditorAppearanceTests: XCTestCase {
     func testBuiltInThemeCatalogIncludesExpandedPresetPack() {
         let choices = NativeEditorAppearance.builtInThemeChoices
-        XCTAssertGreaterThanOrEqual(choices.count, 10, "Expected expanded built-in theme catalog")
+        XCTAssertGreaterThanOrEqual(choices.count, 20, "Expected expanded built-in theme catalog")
+        XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.turbodraftIce.rawValue })
+        XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.tokyoNight.rawValue })
+        XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.vscodeDarkPlus.rawValue })
         XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.githubDark.rawValue })
         XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.dracula.rawValue })
         XCTAssertTrue(choices.contains { $0.value == NativeEditorThemeMode.solarizedLight.rawValue })
@@ -91,6 +94,61 @@ final class NativeEditorAppearanceTests: XCTestCase {
         XCTAssertThrowsError(
             try NativeEditorAppearance.importCustomTheme(from: url, defaults: defaults),
             "Invalid schema should be rejected"
+        )
+    }
+
+    func testCustomThemeFallbackPreservesExpandedDynamicPaletteTokens() {
+        let suiteName = "NativeEditorAppearanceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated user defaults suite")
+            return
+        }
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let dark = NSAppearance(named: .darkAqua)!
+        defaults.set(NativeEditorThemeMode.system.rawValue, forKey: NativeEditorAppearance.themeModeKey)
+
+        let expectedEditorBackground = NativeEditorAppearance.editorBackgroundColor(defaults: defaults, appearance: dark)
+        let expectedSidebarBackground = NativeEditorAppearance.sidebarBackgroundColor(defaults: defaults, appearance: dark)
+        let expectedTableHeaderBackground = NativeEditorAppearance.tableHeaderBackgroundColor(defaults: defaults, appearance: dark)
+        let expectedInlineCodeText = NativeEditorAppearance.inlineCodeTextColor(defaults: defaults, appearance: dark)
+
+        let themeJSON = """
+        {
+          "name": "Partial Custom",
+          "textColor": "#ABCDEF",
+          "linkColor": "#123456",
+          "codeBlockBackground": "#24283B",
+          "codeBlockStroke": "#2C3145",
+          "inlineCodeBackground": "#1F2335"
+        }
+        """
+        defaults.set(themeJSON, forKey: NativeEditorAppearance.customThemeJSONKey)
+        defaults.set(NativeEditorThemeMode.custom.rawValue, forKey: NativeEditorAppearance.themeModeKey)
+
+        assertColor(NativeEditorAppearance.primaryTextColor(defaults: defaults), equalsHex: "#ABCDEF")
+        assertColor(NativeEditorAppearance.linkColor(defaults: defaults), equalsHex: "#123456")
+        assertColor(NativeEditorAppearance.codeBlockBackgroundColor(defaults: defaults, appearance: dark), equalsHex: "#24283B")
+        assertColor(NativeEditorAppearance.codeBlockStrokeColor(defaults: defaults, appearance: dark), equalsHex: "#2C3145")
+        assertColor(NativeEditorAppearance.inlineCodeBackgroundColor(defaults: defaults, appearance: dark), equalsHex: "#1F2335")
+
+        assertColor(
+            NativeEditorAppearance.editorBackgroundColor(defaults: defaults, appearance: dark),
+            equals: expectedEditorBackground
+        )
+        assertColor(
+            NativeEditorAppearance.sidebarBackgroundColor(defaults: defaults, appearance: dark),
+            equals: expectedSidebarBackground
+        )
+        assertColor(
+            NativeEditorAppearance.tableHeaderBackgroundColor(defaults: defaults, appearance: dark),
+            equals: expectedTableHeaderBackground
+        )
+        assertColor(
+            NativeEditorAppearance.inlineCodeTextColor(defaults: defaults, appearance: dark),
+            equals: expectedInlineCodeText
         )
     }
 
@@ -255,4 +313,67 @@ final class NativeEditorAppearanceTests: XCTestCase {
         XCTAssertGreaterThan(link.blueComponent, link.redComponent)
         XCTAssertGreaterThan(codeBg.redComponent, 0.05)
     }
+}
+
+private func assertColor(
+    _ actual: NSColor,
+    equals expected: NSColor,
+    accuracy: CGFloat = 0.001,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    guard let actualRGB = actual.usingColorSpace(.deviceRGB) else {
+        XCTFail("Actual color should convert to device RGB", file: file, line: line)
+        return
+    }
+    guard let expectedRGB = expected.usingColorSpace(.deviceRGB) else {
+        XCTFail("Expected color should convert to device RGB", file: file, line: line)
+        return
+    }
+
+    XCTAssertEqual(actualRGB.redComponent, expectedRGB.redComponent, accuracy: accuracy, file: file, line: line)
+    XCTAssertEqual(actualRGB.greenComponent, expectedRGB.greenComponent, accuracy: accuracy, file: file, line: line)
+    XCTAssertEqual(actualRGB.blueComponent, expectedRGB.blueComponent, accuracy: accuracy, file: file, line: line)
+    XCTAssertEqual(actualRGB.alphaComponent, expectedRGB.alphaComponent, accuracy: accuracy, file: file, line: line)
+}
+
+private func assertColor(
+    _ actual: NSColor,
+    equalsHex hex: String,
+    accuracy: CGFloat = 0.001,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    guard let expected = testColorFromHex(hex) else {
+        XCTFail("Expected valid hex color", file: file, line: line)
+        return
+    }
+    assertColor(actual, equals: expected, accuracy: accuracy, file: file, line: line)
+}
+
+private func testColorFromHex(_ raw: String) -> NSColor? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        .replacingOccurrences(of: "#", with: "")
+    guard trimmed.count == 6 || trimmed.count == 8,
+          let value = UInt64(trimmed, radix: 16) else {
+        return nil
+    }
+
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let alpha: CGFloat
+    if trimmed.count == 8 {
+        red = CGFloat((value & 0xFF00_0000) >> 24) / 255.0
+        green = CGFloat((value & 0x00FF_0000) >> 16) / 255.0
+        blue = CGFloat((value & 0x0000_FF00) >> 8) / 255.0
+        alpha = CGFloat(value & 0x0000_00FF) / 255.0
+    } else {
+        red = CGFloat((value & 0xFF00_00) >> 16) / 255.0
+        green = CGFloat((value & 0x00FF_00) >> 8) / 255.0
+        blue = CGFloat(value & 0x0000_FF) / 255.0
+        alpha = 1.0
+    }
+
+    return NSColor(calibratedRed: red, green: green, blue: blue, alpha: alpha)
 }

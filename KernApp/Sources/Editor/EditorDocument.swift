@@ -72,9 +72,11 @@ final class EditorDocument: NSDocument {
     @MainActor
     override func makeWindowControllers() {
         let isUITesting = ProcessInfo.processInfo.environment["KERN_UI_TESTING"] == "1"
+        let suppressActivation = ProcessInfo.processInfo.environment["KERN_SUPPRESS_ACTIVATION"] == "1"
+            || CommandLine.arguments.contains("--kern-background")
 
         // Restore Dock icon and menu bar if app was hidden in background daemon mode
-        if NSApp.activationPolicy() != .regular {
+        if !suppressActivation, NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -84,10 +86,13 @@ final class EditorDocument: NSDocument {
 
         // UI tests are only reliable if the app is the foreground app.
         // `xcodebuild test` can launch the app in the background, so force a best-effort activation here.
-        if isUITesting {
+        if isUITesting, !suppressActivation {
             windowController.showWindow(self)
             windowController.window?.makeKeyAndOrderFront(self)
             NSApp.activate(ignoringOtherApps: true)
+        } else if suppressActivation {
+            windowController.showWindow(self)
+            windowController.window?.orderFrontRegardless()
         }
 
         // Establish a baseline mod date so our file presenter doesn't treat the initial open

@@ -16,6 +16,12 @@ final class NativeMarkdownTextView: NSTextView {
 
     static let kernMarkdownPasteboardType = NSPasteboard.PasteboardType("com.gradigit.kern.markdown")
 
+    struct DebugCheckboxDecoration {
+        let characterRange: NSRange
+        let rect: NSRect
+        let checked: Bool
+    }
+
     private var hoverTrackingArea: NSTrackingArea?
     private var lastHoverCodeBlockRange: NSRange?
 
@@ -35,6 +41,127 @@ final class NativeMarkdownTextView: NSTextView {
         drawBlockquoteDecorations(in: dirtyRect)
         drawCodeBlockBackgrounds(in: dirtyRect)
         super.draw(dirtyRect)
+        drawCheckboxDecorations(in: dirtyRect)
+    }
+
+    private func drawCheckboxDecorations(in dirtyRect: NSRect) {
+        for decoration in checkboxDecorations(in: dirtyRect) {
+            drawCheckbox(in: decoration.rect, checked: decoration.checked)
+        }
+    }
+
+    func _debugCheckboxDecorationsForTests(in dirtyRect: NSRect? = nil) -> [DebugCheckboxDecoration] {
+        checkboxDecorations(in: dirtyRect ?? bounds)
+    }
+
+    func _debugCalloutGroupRangeForTests(containing location: Int) -> NSRange? {
+        guard let storage = textStorage,
+              location >= 0,
+              location < storage.length else { return nil }
+        let quoteDepth = (storage.attribute(.kernQuoteDepth, at: location, effectiveRange: nil) as? Int) ?? 0
+        guard quoteDepth > 0 else { return nil }
+
+        let ns = storage.string as NSString
+        guard let group = calloutGroup(containing: location, quoteDepth: quoteDepth, storage: storage, ns: ns) else {
+            return nil
+        }
+        return NSRange(location: group.start, length: max(0, group.end - group.start))
+    }
+
+    private func checkboxDecorations(in dirtyRect: NSRect) -> [DebugCheckboxDecoration] {
+        guard let storage = textStorage,
+              let lm = layoutManager,
+              let tc = textContainer,
+              storage.length > 0 else { return [] }
+
+        let sourceRect = visibleRect.isEmpty ? bounds : visibleRect
+        let containerRect = sourceRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let visibleGlyphs = lm.glyphRange(forBoundingRect: containerRect, in: tc)
+        let visibleChars = lm.characterRange(forGlyphRange: visibleGlyphs, actualGlyphRange: nil)
+        let clampedVisibleChars = NSIntersectionRange(visibleChars, NSRange(location: 0, length: storage.length))
+        guard clampedVisibleChars.length > 0 else { return [] }
+
+        var decorations: [DebugCheckboxDecoration] = []
+        storage.enumerateAttribute(.kernCheckbox, in: clampedVisibleChars, options: []) { value, range, _ in
+            guard (value as? Bool) == true else { return }
+            guard let glyphRange = glyphRangeForCheckboxCharacter(range, layoutManager: lm),
+                  glyphRange.length > 0 else { return }
+
+            let checked = (storage.attribute(.kernCheckboxChecked, at: range.location, effectiveRange: nil) as? Bool) ?? false
+            let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+            let rect = checkboxRect(forGlyphRange: glyphRange, font: font, layoutManager: lm, textContainer: tc)
+            guard !rect.isNull, rect.intersects(dirtyRect) else { return }
+
+            decorations.append(DebugCheckboxDecoration(characterRange: range, rect: rect, checked: checked))
+        }
+        return decorations
+    }
+
+    private func glyphRangeForCheckboxCharacter(_ range: NSRange, layoutManager: NSLayoutManager) -> NSRange? {
+        var actualCharRange = NSRange(location: 0, length: 0)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: range.location, length: min(1, range.length)),
+            actualCharacterRange: &actualCharRange
+        )
+        return glyphRange.length > 0 ? glyphRange : nil
+    }
+
+    private func checkboxRect(
+        forGlyphRange glyphRange: NSRange,
+        font: NSFont?,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> NSRect {
+        var lineGlyphRange = NSRange(location: 0, length: 0)
+        let lineRect = layoutManager.lineFragmentUsedRect(
+            forGlyphAt: glyphRange.location,
+            effectiveRange: &lineGlyphRange
+        )
+        let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        let pointSize = font?.pointSize ?? self.font?.pointSize ?? NSFont.systemFontSize
+        let side = max(12, min(17, pointSize * 0.86))
+        let origin = textContainerOrigin
+        let midX = origin.x + (glyphRect.isEmpty ? glyphRect.origin.x + side / 2 : glyphRect.midX)
+        let midY = origin.y + (lineRect.isEmpty ? glyphRect.midY : lineRect.midY)
+        return NSRect(
+            x: (midX - side / 2).rounded(.toNearestOrAwayFromZero) + 0.5,
+            y: (midY - side / 2).rounded(.toNearestOrAwayFromZero) + 0.5,
+            width: side.rounded(.toNearestOrAwayFromZero),
+            height: side.rounded(.toNearestOrAwayFromZero)
+        )
+    }
+
+    private func drawCheckbox(in rect: NSRect, checked: Bool) {
+        let accent = NativeEditorAppearance.linkColor().usingColorSpace(.deviceRGB) ?? .systemBlue
+        let secondary = NativeEditorAppearance.secondaryTextColor().usingColorSpace(.deviceRGB) ?? .secondaryLabelColor
+        let background = NativeEditorAppearance.editorBackgroundColor(appearance: effectiveAppearance)
+            .usingColorSpace(.deviceRGB) ?? .textBackgroundColor
+        let radius = min(4.5, rect.width * 0.30)
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+        if checked {
+            accent.setFill()
+            path.fill()
+            accent.blended(withFraction: 0.18, of: .white)?.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+
+            let check = NSBezierPath()
+            check.lineWidth = max(1.7, rect.width * 0.14)
+            check.lineCapStyle = .round
+            check.lineJoinStyle = .round
+            check.move(to: NSPoint(x: rect.minX + rect.width * 0.25, y: rect.minY + rect.height * 0.55))
+            check.line(to: NSPoint(x: rect.minX + rect.width * 0.42, y: rect.minY + rect.height * 0.72))
+            check.line(to: NSPoint(x: rect.minX + rect.width * 0.76, y: rect.minY + rect.height * 0.32))
+            NSColor.white.setStroke()
+            check.stroke()
+        } else {
+            background.withAlphaComponent(0.96).setFill()
+            path.fill()
+            secondary.withAlphaComponent(0.55).setStroke()
+            path.lineWidth = 1.2
+            path.stroke()
+        }
     }
 
     override func updateTrackingAreas() {
@@ -450,7 +577,7 @@ final class NativeMarkdownTextView: NSTextView {
                 let quoteDepth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
 
                 // Group consecutive codeBlock paragraphs (represents one fenced block).
-                var start = para.location
+                let start = para.location
                 var end = para.location + para.length
                 var scan = end
                 while scan < ns.length {
@@ -536,7 +663,7 @@ final class NativeMarkdownTextView: NSTextView {
                 let quoteDepth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
 
                 // Group consecutive codeBlock paragraphs (represents one fenced block).
-                var start = para.location
+                let start = para.location
                 var end = para.location + para.length
                 var scan = end
                 while scan < ns.length {
@@ -605,8 +732,8 @@ final class NativeMarkdownTextView: NSTextView {
         guard let storage = textStorage, let lm = layoutManager, let tc = textContainer else { return }
         let ns = storage.string as NSString
 
-        let barColor = NSColor.separatorColor.withAlphaComponent(0.75)
-        let fillColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.12)
+        let barColor = NativeEditorAppearance.quoteBarColor(appearance: effectiveAppearance).withAlphaComponent(0.85)
+        let fillColor = NativeEditorAppearance.quoteFillColor(appearance: effectiveAppearance)
         let barWidth: CGFloat = 2
         let barSpacing: CGFloat = 16
         let minBarHeight: CGFloat = 10
@@ -619,6 +746,7 @@ final class NativeMarkdownTextView: NSTextView {
         let startLimit = max(0, dirtyChars.location)
         let endLimit = min(ns.length, dirtyChars.location + dirtyChars.length)
 
+        var drawnCalloutStarts = Set<Int>()
         var idx = startLimit
         while idx < endLimit {
             let para = ns.paragraphRange(for: NSRange(location: idx, length: 0))
@@ -627,6 +755,15 @@ final class NativeMarkdownTextView: NSTextView {
 
             let quoteDepth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
             if quoteDepth > 0 {
+                if let callout = calloutGroup(containing: para.location, quoteDepth: quoteDepth, storage: storage, ns: ns) {
+                    if !drawnCalloutStarts.contains(callout.start) {
+                        drawnCalloutStarts.insert(callout.start)
+                        drawCalloutGroup(callout, quoteDepth: quoteDepth, dirtyRect: dirtyRect)
+                    }
+                    idx = para.location + para.length
+                    continue
+                }
+
                 let glyphRange = lm.glyphRange(forCharacterRange: para, actualCharacterRange: nil)
                 if glyphRange.length > 0 {
                     var rect = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
@@ -674,6 +811,110 @@ final class NativeMarkdownTextView: NSTextView {
 
             idx = para.location + para.length
         }
+    }
+
+    private struct CalloutGroup {
+        let start: Int
+        let end: Int
+        let kind: KernCalloutKind
+    }
+
+    private func calloutGroup(containing location: Int, quoteDepth: Int, storage: NSTextStorage, ns: NSString) -> CalloutGroup? {
+        guard location >= 0, location < storage.length else { return nil }
+        var groupStart = location
+        var scan = location
+        while scan > 0 {
+            let previousLocation = max(0, scan - 1)
+            let previousPara = ns.paragraphRange(for: NSRange(location: previousLocation, length: 0))
+            if previousPara.location == scan || previousPara.length == 0 { break }
+            guard previousPara.location < storage.length else { break }
+            let previousDepth = (storage.attribute(.kernQuoteDepth, at: previousPara.location, effectiveRange: nil) as? Int) ?? 0
+            if previousDepth != quoteDepth { break }
+            groupStart = previousPara.location
+            scan = previousPara.location
+        }
+
+        var calloutStart: Int?
+        var calloutKind: KernCalloutKind?
+        scan = groupStart
+        while scan < storage.length {
+            let para = ns.paragraphRange(for: NSRange(location: scan, length: 0))
+            guard para.length > 0, para.location < storage.length else { break }
+            let depth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
+            if depth != quoteDepth { break }
+            if let raw = storage.attribute(.kernCalloutKind, at: para.location, effectiveRange: nil) as? String,
+               let kind = KernCalloutKind(rawValue: raw) {
+                calloutStart = para.location
+                calloutKind = kind
+                break
+            }
+            scan = para.location + para.length
+        }
+
+        guard let start = calloutStart, let kind = calloutKind, location >= start else { return nil }
+
+        var end = start
+        scan = start
+        while scan < ns.length {
+            let para = ns.paragraphRange(for: NSRange(location: scan, length: 0))
+            guard para.length > 0, para.location < storage.length else { break }
+            let depth = (storage.attribute(.kernQuoteDepth, at: para.location, effectiveRange: nil) as? Int) ?? 0
+            if depth != quoteDepth { break }
+            if para.location != start,
+               storage.attribute(.kernCalloutKind, at: para.location, effectiveRange: nil) as? String != nil {
+                break
+            }
+            end = para.location + para.length
+            scan = end
+        }
+
+        return CalloutGroup(start: start, end: max(start, end), kind: kind)
+    }
+
+    private func drawCalloutGroup(_ callout: CalloutGroup, quoteDepth: Int, dirtyRect: NSRect) {
+        guard let storage = textStorage, let lm = layoutManager, let tc = textContainer else { return }
+        let charRange = NSRange(location: callout.start, length: max(0, callout.end - callout.start))
+        guard charRange.length > 0 else { return }
+        let glyphRange = lm.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return }
+
+        var used = lm.boundingRect(forGlyphRange: glyphRange, in: tc)
+        used.origin.x += textContainerOrigin.x
+        used.origin.y += textContainerOrigin.y
+
+        var line = lm.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+        line.origin.x += textContainerOrigin.x
+        line.origin.y += textContainerOrigin.y
+
+        let style = storage.attribute(.paragraphStyle, at: callout.start, effectiveRange: nil) as? NSParagraphStyle
+        let quoteIndent: CGFloat = CGFloat(quoteDepth) * 16
+        let baseIndent = max(0, (style?.headIndent ?? 0) - quoteIndent)
+        let x = textContainerOrigin.x + baseIndent + 6
+        let right = max(used.maxX + 14, line.maxX - 6)
+        var rect = NSRect(
+            x: x,
+            y: used.minY - 7,
+            width: max(32, right - x),
+            height: used.height + 14
+        ).integral
+        if rect.height < 30 {
+            rect.size.height = 30
+            rect.origin.y = used.midY - 15
+        }
+        guard rect.intersects(dirtyRect) else { return }
+
+        let styleColors = NativeEditorAppearance.calloutStyle(kind: callout.kind, appearance: effectiveAppearance)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        styleColors.fill.setFill()
+        path.fill()
+        styleColors.stroke.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let accentRect = NSRect(x: rect.minX, y: rect.minY, width: 3, height: rect.height)
+        let accentPath = NSBezierPath(roundedRect: accentRect, xRadius: 1.5, yRadius: 1.5)
+        styleColors.accent.setFill()
+        accentPath.fill()
     }
 
     private func characterIndex(at point: NSPoint) -> Int? {

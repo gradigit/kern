@@ -108,6 +108,24 @@ final class NativeMarkdownSpecConformanceTests: XCTestCase {
         XCTAssertTrue(rendered.contains("[ ] heading task"), "Strict profile should keep heading task syntax literal")
         XCTAssertTrue(rendered.contains("[x] ordered task"), "Strict profile should keep ordered task syntax literal")
 
+        let calloutSource = """
+        > [!NOTE] strict literal
+        > body
+        """
+        let importedCallout = NativeMarkdownCodec.importMarkdown(calloutSource, options: strict, baseURL: nil)
+        XCTAssertTrue(
+            importedCallout.string.contains("[!NOTE] strict literal"),
+            "Strict profile should keep callout syntax literal"
+        )
+        XCTAssertNil(
+            importedCallout.attribute(.kernCalloutKind, at: 0, effectiveRange: nil),
+            "Strict profile should not attach Kern callout attributes"
+        )
+        XCTAssertEqual(
+            NativeMarkdownCodec.exportMarkdown(importedCallout, options: strict),
+            calloutSource
+        )
+
         var kern = strict
         kern.orderedTasksEnabled = true
         kern.headingCheckboxesEnabled = true
