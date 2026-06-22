@@ -569,6 +569,45 @@ final class NativeMarkdownCodecTests: XCTestCase {
     }
 
     @MainActor
+    func testInlineHtmlBreakRendersAsLineSeparatorAndRoundTripsSource() {
+        let md = "alpha<br />beta"
+
+        let attr = NativeMarkdownCodec.importMarkdown(md)
+
+        XCTAssertEqual(attr.string, "alpha\u{2028}beta")
+        XCTAssertFalse(attr.string.contains("<br"))
+        XCTAssertEqual(NativeMarkdownCodec.exportMarkdown(attr), md)
+    }
+
+    @MainActor
+    func testInlineHtmlBreakVariantsRenderAsLineSeparators() {
+        let parsed = NativeMarkdownCodec.parseInline(
+            "one<br>two<BR/>three<br />four",
+            baseFont: NSFont.systemFont(ofSize: 16)
+        )
+
+        XCTAssertEqual(parsed.string, "one\u{2028}two\u{2028}three\u{2028}four")
+        XCTAssertFalse(parsed.string.contains("<br"))
+        XCTAssertEqual(NativeMarkdownCodec.exportMarkdown(parsed), "one<br>two<BR/>three<br />four")
+    }
+
+    @MainActor
+    func testListPlaceholderHtmlBreakDoesNotRenderRawTag() {
+        let md = """
+        - <br />
+
+          1. [x] Nested checked
+        """
+
+        let attr = NativeMarkdownCodec.importMarkdown(md)
+
+        XCTAssertFalse(attr.string.contains("<br"))
+        XCTAssertTrue(attr.string.contains("\u{2028}"))
+        XCTAssertTrue(attr.string.contains("Nested checked"))
+        XCTAssertTrue(NativeMarkdownCodec.exportMarkdown(attr).contains("- <br />"))
+    }
+
+    @MainActor
     func testParseInlineIntrawordUnderscoresStayLiteral() {
         let parsed = NativeMarkdownCodec.parseInline(
             "foo_bar_baz",
@@ -1015,13 +1054,14 @@ final class NativeMarkdownCodecTests: XCTestCase {
             XCTAssertNotEqual(codeRange.location, NSNotFound)
             guard codeRange.location != NSNotFound else { return }
 
-            let actualBackground = imported.attribute(.backgroundColor, at: codeRange.location, effectiveRange: nil) as? NSColor
-            let expectedBackground = NativeEditorAppearance.inlineCodeBackgroundColor()
+            let actualForeground = imported.attribute(.foregroundColor, at: codeRange.location, effectiveRange: nil) as? NSColor
+            let expectedForeground = NativeEditorAppearance.inlineCodeTextColor()
             assertColorsEqual(
-                actualBackground,
-                expectedBackground,
-                "Shared inline cache should not reuse inline-code colors across theme changes"
+                actualForeground,
+                expectedForeground,
+                "Shared inline cache should not reuse inline-code text colors across theme changes"
             )
+            XCTAssertEqual(imported.attribute(.kernInlineCode, at: codeRange.location, effectiveRange: nil) as? Bool, true)
         }
     }
 

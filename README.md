@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="KernApp/Resources/Assets.xcassets/AppIcon.appiconset/icon_256.png" width="112" height="112" alt="Kern app icon">
+</p>
+
 # Kern
 
 Kern is a fully native macOS WYSIWYG Markdown editor. You open a local `.md` file and edit rendered content directly, without living in raw markdown syntax.
@@ -25,6 +29,7 @@ Kern is built for a simpler workflow: open any local markdown file, edit in true
 - Checkboxes in multiple forms (standalone, bulleted tasks, ordered tasks, heading tasks).
 - Native code block chrome (language pill + copy affordance).
 - Native rendering paths for images, Mermaid, and math.
+- Appearance preferences for themes, fonts, full-width editing, and centered readable columns.
 - File watching, autosave, and standard macOS window/tab behavior.
 
 ## Quick Start (Open a Markdown File)
@@ -170,6 +175,7 @@ Signed/notarized macOS distribution is not published from this repository.
 - [docs/release/release-validation-gate.md](docs/release/release-validation-gate.md)
 - [docs/release/public-repo-health.md](docs/release/public-repo-health.md)
 - [docs/release/v0.1.2-validation-evidence.md](docs/release/v0.1.2-validation-evidence.md)
+- [docs/release/v0.1.3-release-candidate-evidence.md](docs/release/v0.1.3-release-candidate-evidence.md)
 - [docs/dependencies.md](docs/dependencies.md)
 - [docs/plans/README.md](docs/plans/README.md)
 - [NATIVE-EDITOR-TEST-MATRIX.md](NATIVE-EDITOR-TEST-MATRIX.md)
@@ -210,4 +216,5 @@ For review requests, include failing/passing test evidence and any snapshot or U
 - This repository is a public source project. Tagged releases may include an unsigned DMG plus checksum, but signed/notarized macOS distribution is not published from this repository.
 - This repository is licensed under **Apache-2.0**.
 - Latest public release: `v0.1.2`.
+- Next release candidate version: `0.1.3` / build `4`.
 - Open-source release hardening is active. Full-fidelity benchmark work remains deferred; product hardening is still in progress.

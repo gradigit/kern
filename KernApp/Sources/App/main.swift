@@ -13,6 +13,11 @@ func msSinceStart() -> String {
 
 NSLog("[Perf] Process start at 0.0ms")
 
+// Kern manages document windows explicitly. Disable AppKit saved-window restoration so
+// LaunchServices file opens cannot resurrect stale, title-only windows before the real
+// NSDocument open path has attached and rendered markdown content.
+UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
+
 // Native editor preferences (UI tests / automation).
 //
 // Important: UI tests must be deterministic and must not mutate a developer's persisted defaults.
@@ -31,6 +36,8 @@ if isUITesting {
         "nativeEditor.orderedListNumbering": "gfmDefault",
         "nativeEditor.mermaidRenderMode": "rich",
         "nativeEditor.checkboxHitTarget": "glyph",
+        "nativeEditor.readableWidthMode": "fullWidth",
+        "nativeEditor.readableMaxWidth": 760,
     ]
 
     // Apply per-run/per-test overrides from env.
@@ -40,10 +47,12 @@ if isUITesting {
     if let v = env["KERN_NATIVE_ORDERED_TASKS"] { overrides["nativeEditor.orderedTasksEnabled"] = (v == "1") }
     if let v = env["KERN_NATIVE_HEADING_CHECKBOXES"] { overrides["nativeEditor.headingCheckboxesEnabled"] = (v == "1") }
     if let v = env["KERN_NATIVE_ORDERED_NUMBERING"] { overrides["nativeEditor.orderedListNumbering"] = v } // gfmDefault | preserveTyped
-    if let v = env["KERN_NATIVE_MERMAID_RENDER_MODE"] { overrides["nativeEditor.mermaidRenderMode"] = v } // rich | ascii | auto
+    if let v = env["KERN_NATIVE_MERMAID_RENDER_MODE"] { overrides["nativeEditor.mermaidRenderMode"] = v } // rich | ascii | auto | officialExternal
     if let v = env["KERN_NATIVE_MERMAID_AUTO_ASCII_THRESHOLD"] { overrides["nativeEditor.mermaidAutoAsciiThreshold"] = v }
     if let v = env["KERN_NATIVE_CHECKBOX_HIT_TARGET"] { overrides["nativeEditor.checkboxHitTarget"] = v } // glyph | marker
     if let v = env["KERN_NATIVE_THEME"] { overrides["nativeEditor.themeMode"] = v }
+    if let v = env["KERN_NATIVE_READABLE_WIDTH_MODE"] { overrides["nativeEditor.readableWidthMode"] = v } // fullWidth | centered
+    if let v = env["KERN_NATIVE_READABLE_MAX_WIDTH"], let width = Double(v) { overrides["nativeEditor.readableMaxWidth"] = width }
 
     // Use NSArgumentDomain (highest-precedence, in-memory) so overrides win over any persisted defaults
     // without mutating the developer's preferences on disk.
@@ -91,7 +100,7 @@ if isUITesting {
         UserDefaults.standard.set(v, forKey: "nativeEditor.orderedListNumbering") // gfmDefault | preserveTyped
     }
     if let v = env["KERN_NATIVE_MERMAID_RENDER_MODE"] {
-        UserDefaults.standard.set(v, forKey: "nativeEditor.mermaidRenderMode") // rich | ascii | auto
+        UserDefaults.standard.set(v, forKey: "nativeEditor.mermaidRenderMode") // rich | ascii | auto | officialExternal
     }
     if let v = env["KERN_NATIVE_MERMAID_AUTO_ASCII_THRESHOLD"] {
         UserDefaults.standard.set(v, forKey: "nativeEditor.mermaidAutoAsciiThreshold")
@@ -101,6 +110,12 @@ if isUITesting {
     }
     if let v = env["KERN_NATIVE_THEME"] {
         UserDefaults.standard.set(v, forKey: "nativeEditor.themeMode")
+    }
+    if let v = env["KERN_NATIVE_READABLE_WIDTH_MODE"] {
+        UserDefaults.standard.set(v, forKey: "nativeEditor.readableWidthMode") // fullWidth | centered
+    }
+    if let v = env["KERN_NATIVE_READABLE_MAX_WIDTH"], let width = Double(v) {
+        UserDefaults.standard.set(width, forKey: "nativeEditor.readableMaxWidth")
     }
 }
 
