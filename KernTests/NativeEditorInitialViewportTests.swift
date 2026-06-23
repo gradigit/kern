@@ -1212,10 +1212,10 @@ final class NativeEditorInitialViewportTests: XCTestCase {
 
     func testAdaptiveBudgetSuppressesTurboIdleBoostAfterRollingParsePressure() {
         var controller = StagedPromotionAdaptiveBudgetController(
-            resetMicroStepChars: 448_000,
+            resetMicroStepChars: 1_000_000,
             minMicroStepChars: 128_000,
             normalMaxMicroStepChars: 2_400_000,
-            turboMaxMicroStepChars: 640_000
+            turboMaxMicroStepChars: 1_000_000
         )
 
         XCTAssertFalse(controller.idleBoostSuppressed)
@@ -1230,20 +1230,21 @@ final class NativeEditorInitialViewportTests: XCTestCase {
         }
 
         XCTAssertTrue(controller.idleBoostSuppressed, "Sustained high parse pressure should suppress turbo idle boost")
-        XCTAssertLessThan(controller.microStepChars, 448_000, "High parse pressure should shrink the adaptive slice cap")
+        XCTAssertLessThan(controller.microStepChars, 1_000_000, "High parse pressure should shrink the adaptive slice cap")
     }
 
     func testProductionViewportMicroStepDefaultsRemainUserFacing() {
-        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionViewportMicroStepChars, 448_000)
-        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionTurboViewportMicroStepMaxChars, 640_000)
+        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionViewportMicroStepChars, 1_000_000)
+        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionTurboViewportMicroStepMaxChars, 1_000_000)
+        XCTAssertEqual(NativeEditorViewController.defaultStagedPromotionIdleOffMainMicroStepChars, 2_000_000)
     }
 
     func testAdaptiveBudgetRequiresStableCheapWindowBeforeTurboIdleBoostReturns() {
         var controller = StagedPromotionAdaptiveBudgetController(
-            resetMicroStepChars: 448_000,
+            resetMicroStepChars: 1_000_000,
             minMicroStepChars: 128_000,
             normalMaxMicroStepChars: 2_400_000,
-            turboMaxMicroStepChars: 640_000
+            turboMaxMicroStepChars: 1_000_000
         )
 
         for _ in 0..<4 {
@@ -1275,10 +1276,10 @@ final class NativeEditorInitialViewportTests: XCTestCase {
 
     func testAdaptiveBudgetTurboRegrowsAfterStableModerateParseWindows() {
         var controller = StagedPromotionAdaptiveBudgetController(
-            resetMicroStepChars: 448_000,
+            resetMicroStepChars: 1_000_000,
             minMicroStepChars: 128_000,
             normalMaxMicroStepChars: 2_400_000,
-            turboMaxMicroStepChars: 640_000
+            turboMaxMicroStepChars: 1_000_000
         )
 
         for _ in 0..<4 {
@@ -1290,7 +1291,7 @@ final class NativeEditorInitialViewportTests: XCTestCase {
             )
         }
 
-        XCTAssertLessThan(controller.microStepChars, 448_000, "High parse pressure should shrink the turbo cap")
+        XCTAssertLessThan(controller.microStepChars, 1_000_000, "High parse pressure should shrink the turbo cap")
         XCTAssertGreaterThanOrEqual(controller.microStepChars, 128_000, "Turbo cap should stay above the hard floor until pressure is extreme")
 
         for _ in 0..<5 {
@@ -1306,12 +1307,12 @@ final class NativeEditorInitialViewportTests: XCTestCase {
         XCTAssertGreaterThan(controller.microStepChars, 128_000, "Turbo cap should regrow once moderate parse windows stabilize below the turbo low-pressure lane")
     }
 
-    func testAdaptiveBudgetTurboOffMainImportKeepsLargerSlicesUnderModerateParsePressure() {
+    func testAdaptiveBudgetTurboOffMainImportKeepsProductionCapUnderModerateParsePressure() {
         var controller = StagedPromotionAdaptiveBudgetController(
-            resetMicroStepChars: 448_000,
+            resetMicroStepChars: 1_000_000,
             minMicroStepChars: 128_000,
             normalMaxMicroStepChars: 2_400_000,
-            turboMaxMicroStepChars: 640_000
+            turboMaxMicroStepChars: 1_000_000
         )
 
         for _ in 0..<5 {
@@ -1325,7 +1326,7 @@ final class NativeEditorInitialViewportTests: XCTestCase {
         }
 
         XCTAssertFalse(controller.idleBoostSuppressed, "Off-main turbo imports should not suppress idle growth under moderate parse pressure")
-        XCTAssertGreaterThan(controller.microStepChars, 448_000, "Off-main turbo imports should regrow toward larger slices when apply latency stays cheap")
+        XCTAssertEqual(controller.microStepChars, 1_000_000, "Off-main turbo imports should keep the production cap when apply latency stays cheap")
     }
 
     private struct HostedEditorWindow {
