@@ -145,11 +145,6 @@ We will measure (cold + warm where relevant):
 - Save latency (including export flush)
 - Memory (RSS) after opening mega doc + after idle
 
-Current performance-pipeline hardening details live in
-`docs/plans/2026-06-20-performance-evaluation-pipeline-hardening.md`. Use that
-workflow for baseline/candidate A/B runs before accepting performance-sensitive
-rendering changes.
-
 The native benchmark runner must preserve enough data to audit each A/B
 decision after the fact: selected tests, manifest/environment, fixture hashes,
 baseline-selection notes, process snapshots, raw XCTest log, machine-readable

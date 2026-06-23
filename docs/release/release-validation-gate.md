@@ -132,7 +132,7 @@ For the current unsigned DMG path, a GitHub release is ready only if **all** of 
 6. after upload, the published DMG and the published `.sha256` sidecar both match the reviewed local digest
 7. the unsigned `spctl` posture was recorded
 8. the packaged-app manual checklist was completed and archived with the tested macOS version
-9. release evidence was recorded in a versioned file under `docs/release/`
+9. release evidence was recorded in the GitHub release notes, release issue, or a fresh versioned evidence file when public evidence should be tracked in-repo
 
 ## Related docs
 
@@ -140,4 +140,3 @@ For the current unsigned DMG path, a GitHub release is ready only if **all** of 
 - [Building Kern from source](building-kern-from-source.md)
 - [GitHub release checklist](github-release-checklist.md)
 - [Unsigned DMG security posture](unsigned-dmg-security-posture.md)
-- [v0.1.2 validation evidence](v0.1.2-validation-evidence.md)

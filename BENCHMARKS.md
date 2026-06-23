@@ -461,7 +461,7 @@ Before any benchmark run:
 - **Full-fidelity aside** (`--suite benchmark_full_fidelity`): optional large-fixture full-fidelity completion comparison (defaults to Kern+Zed)
 - **Microbenchmark suite** (`--suite wow_internal`): non-official Kern-only stage microbenchmark (`suite_kind=internal_microbenchmark`)
 - **TextKit Baseline** is optional and diagnostic-only; adding it to an aside roster intentionally classifies the overall run as Partial because the claim-safe full-fidelity roster is exactly Kern+Zed.
-- `wow_internal` defaults to the small frozen fixture (`cross-editor-benchmark.md`) for minimum-latency numbers.
+- `wow_internal` defaults to the small frozen fixture (`test-fixtures/cross-editor-benchmark.md`) for minimum-latency numbers.
 - `wow_internal` defaults: 10 measured runs, 0 warmups.
 - Legacy aliases (`wow`, `real_use`) map to `benchmark` only
 - Lean cross-editor core path: startup/open, save UI ack, quit (typing off by default)
@@ -502,7 +502,7 @@ Store benchmark results in `benchmark-history/` for trend tracking. v4 is the ca
 
 | File | Size | Purpose |
 | --- | --- | --- |
-| `cross-editor-benchmark.md` | ~18KB | GFM-only, content-neutral cross-editor comparison |
+| `test-fixtures/cross-editor-benchmark.md` | ~18KB | GFM-only, content-neutral cross-editor comparison |
 | `stress-test.md` | ~24KB | Medium document |
 | `mega-stress-test.md` | ~800KB | Large document |
 | `native-editor-benchmark.md` | ~3.6MB | Extreme stress test |

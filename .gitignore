@@ -59,6 +59,7 @@ test-screenshots/
 # Local test/bench artifacts
 test-results/
 bench-results/
+test-fixtures/benchmark-results.md
 dist/
 *.dmg
 *.dmg.sha256
@@ -105,6 +106,9 @@ HUMAN-INPUT.md
 MISSION-CONTROL.md
 SUGGESTIONS.md
 docs/internal/
+docs/**/drafts/
+docs/**/scratch/
+docs/**/local/
 todos/
 
 # Untracked research/internal development scratch artifacts (local only)

@@ -15,9 +15,6 @@ Scope:
   - `./scripts/test-markdown-spec-conformance.sh`
 - Result bundle:
   - `test-results/native-editor/20260517-231911/spec-conformance/KernMarkdownSpecConformance.xcresult`
-- Release evidence:
-  - `docs/release/v0.1.2-validation-evidence.md`
-
 ## Current Score
 
 | Mode | Passed | Total | Failed | Pass Rate |

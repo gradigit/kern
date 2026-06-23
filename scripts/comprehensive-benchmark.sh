@@ -7,7 +7,7 @@
 #
 # Usage: ./scripts/comprehensive-benchmark.sh
 #
-# Results are saved to: test-fixtures/benchmark-results.md
+# Results are saved to: test-results/comprehensive-benchmark/benchmark-results.md
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -18,11 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURES_DIR="$PROJECT_DIR/test-fixtures"
 TABS_DIR="$FIXTURES_DIR/tabs"
-RESULTS_FILE="$FIXTURES_DIR/benchmark-results.md"
+RESULTS_DIR="$PROJECT_DIR/test-results/comprehensive-benchmark"
+RESULTS_FILE="$RESULTS_DIR/benchmark-results.md"
 STRESS_FILE="$FIXTURES_DIR/stress-test.md"
 MEGA_STRESS_FILE="$FIXTURES_DIR/mega-stress-test.md"
 BENCHMARK_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kern-comprehensive.XXXXXX")"
 chmod 700 "$BENCHMARK_TMP_DIR"
+mkdir -p "$RESULTS_DIR"
 
 # Find Kern.app from DerivedData
 KERN_APP_PATH=$(find "$HOME/Library/Developer/Xcode/DerivedData/KernTextKit-"*/Build/Products/Debug \( -name 'Kern.app' -o -name 'KernTextKit.app' \) -maxdepth 0 2>/dev/null | head -1)
