@@ -95,7 +95,7 @@ Preferences are controlled via:
 
 These are called out in `docs/plans/native-editor-test-suite.md` and should graduate into unit tests.
 
-- Backspace at start-of-list/task/ordered should “unlist” the block (`todos/017-*` tracks this)
+- Backspace at start-of-list/task/ordered should “unlist” the block; track this in the native editor feature plan before implementation.
 - Undo/redo correctness across conversions and checkbox toggles
 - External link clicking behavior should open via a safe policy (likely behind a preference)
 - Table editing navigation (arrow keys, tab/shift-tab, enter, selection across cells)
