@@ -1,10 +1,10 @@
 import AppKit
 
-private func markdownImportRequiresMainActor(_ markdown: String) -> Bool {
-    if markdown.contains("![")
-        || markdown.contains("$$")
-        || markdown.contains("```mermaid")
-        || markdown.contains("~~~mermaid") {
+private func markdownImportRequiresMainActor<S: StringProtocol>(_ markdown: S) -> Bool {
+    if markdown.range(of: "![") != nil
+        || markdown.range(of: "$$") != nil
+        || markdown.range(of: "```mermaid") != nil
+        || markdown.range(of: "~~~mermaid") != nil {
         return true
     }
 
@@ -45,6 +45,21 @@ private func markdownImportRequiresMainActor(_ markdown: String) -> Bool {
     }
 
     return lineIsThematicBreak()
+}
+
+private func markdownImportRangeRequiresMainActor(
+    _ markdown: String,
+    startUTF16: Int,
+    endUTF16: Int
+) -> Bool {
+    let utf16Count = markdown.utf16.count
+    let clampedStart = min(max(0, startUTF16), utf16Count)
+    let clampedEnd = min(max(clampedStart, endUTF16), utf16Count)
+    guard clampedStart < clampedEnd else { return false }
+
+    let start = String.Index(utf16Offset: clampedStart, in: markdown)
+    let end = String.Index(utf16Offset: clampedEnd, in: markdown)
+    return markdownImportRequiresMainActor(markdown[start..<end])
 }
 
 private actor StagedPromotionComputeWorker {
@@ -470,8 +485,9 @@ struct StagedPromotionAdaptiveBudgetController {
 /// - exporting back to deterministic Markdown
 @MainActor
 final class NativeEditorViewController: NSViewController, NSTextViewDelegate, NativeMarkdownTextViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
-    nonisolated static let defaultStagedPromotionViewportMicroStepChars = 448_000
-    nonisolated static let defaultStagedPromotionTurboViewportMicroStepMaxChars = 640_000
+    nonisolated static let defaultStagedPromotionViewportMicroStepChars = 1_000_000
+    nonisolated static let defaultStagedPromotionTurboViewportMicroStepMaxChars = 1_000_000
+    nonisolated static let defaultStagedPromotionIdleOffMainMicroStepChars = 2_000_000
 
     private let splitView = NSSplitView()
     private let headingOutlineContainer = NSView()
@@ -614,13 +630,14 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private let stagedPromotionTurboActivateIdleMs = 120
     private let stagedPromotionContextChars = 1_000
     private let stagedPromotionViewportGuardChars = 400
-    // Keep product defaults conservative. Large 1–2M slice caps are reserved for
-    // benchmark-only wrapper profiles so diagnostic tuning does not leak into
-    // user-facing full-fidelity behavior.
+    // Keep interactive defaults conservative. Very large catch-up slices are used
+    // only for fully idle, off-main promotion windows so full-document fidelity can
+    // catch up without introducing main-thread attachment construction stalls.
     private let stagedPromotionViewportMicroStepChars = NativeEditorViewController.defaultStagedPromotionViewportMicroStepChars
     private let stagedPromotionViewportMicroStepMinChars = 128_000
     private let stagedPromotionViewportMicroStepMaxChars = 2_400_000
     private let stagedPromotionTurboViewportMicroStepMaxChars = NativeEditorViewController.defaultStagedPromotionTurboViewportMicroStepMaxChars
+    private let stagedPromotionIdleOffMainMicroStepChars = NativeEditorViewController.defaultStagedPromotionIdleOffMainMicroStepChars
     private let stagedPromotionIdleQuietPeriodMs = 40
     private let stagedPromotionScrollQuietPeriodMs = 90
     private let stagedPromotionLookaheadVisibleChars = 220_000
@@ -6612,10 +6629,20 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             return
         }
 
+        let contextStartUTF16 = stagedPromotionContextStartUTF16(
+            markdown: markdown,
+            renderedUTF16Count: currentRenderedUTF16
+        )
+        let promotionWindowRequiresMainActor = markdownImportRangeRequiresMainActor(
+            markdown,
+            startUTF16: contextStartUTF16,
+            endUTF16: targetUTF16
+        )
         let parseDeltaCap = stagedPromotionViewportMicroStepCharsValue(
             useTurbo: useTurbo,
             sinceInteraction: sinceInteraction,
-            sinceScroll: effectiveSinceScroll
+            sinceScroll: effectiveSinceScroll,
+            promotionWindowRequiresMainActor: promotionWindowRequiresMainActor
         )
         WowInternalMetricsRecorder.shared.recordAuxMetric(
             "wow_staged_promotion_parse_delta_cap_utf16",
@@ -6644,14 +6671,7 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
             } else {
                 cappedDelta = max(
                     1,
-                    min(
-                        rawDeltaUTF16,
-                        stagedPromotionViewportMicroStepCharsValue(
-                            useTurbo: useTurbo,
-                            sinceInteraction: sinceInteraction,
-                            sinceScroll: effectiveSinceScroll
-                        )
-                    )
+                    min(rawDeltaUTF16, parseDeltaCap)
                 )
             }
             if cappedDelta < rawDeltaUTF16 {
@@ -6676,10 +6696,6 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         let cachedContextBoundaryStartUTF16 = stagedContextBoundaryStartUTF16
         let cachedContextBoundaryDisplayStart = stagedContextBoundaryDisplayStart
         let cachedContextBoundaryRenderedUTF16 = stagedContextBoundaryRenderedUTF16
-        let contextStartUTF16 = stagedPromotionContextStartUTF16(
-            markdown: markdown,
-            renderedUTF16Count: currentRenderedUTF16
-        )
 
         stagedPromotionInFlight = true
         stagedPromotionInFlightToken = token
@@ -7330,7 +7346,8 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
     private func stagedPromotionViewportMicroStepCharsValue(
         useTurbo: Bool,
         sinceInteraction: TimeInterval? = nil,
-        sinceScroll: TimeInterval? = nil
+        sinceScroll: TimeInterval? = nil,
+        promotionWindowRequiresMainActor: Bool = true
     ) -> Int {
         if let raw = ProcessInfo.processInfo.environment["KERN_STAGED_PROMOTION_VIEWPORT_MICRO_STEP_CHARS"],
            let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -7358,6 +7375,15 @@ final class NativeEditorViewController: NSViewController, NSTextViewDelegate, Na
         if sinceScroll < 0.9 {
             WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_micro_cap_medium_count")
             return min(baseline, 128_000)
+        }
+        if useTurbo,
+           !promotionWindowRequiresMainActor,
+           sinceInteraction > 2.5,
+           sinceScroll > 2.5 {
+            let idleOffMainCap = min(stagedPromotionViewportMicroStepMaxChars, stagedPromotionIdleOffMainMicroStepChars)
+            let expanded = max(baseline, idleOffMainCap)
+            WowInternalMetricsRecorder.shared.incrementAuxCounter("wow_staged_promotion_micro_cap_idle_off_main_large_count")
+            return expanded
         }
         if useTurbo, sinceInteraction > 2.5, sinceScroll > 2.5 {
             // Fully idle catch-up mode: allow larger slices only when the user has been
