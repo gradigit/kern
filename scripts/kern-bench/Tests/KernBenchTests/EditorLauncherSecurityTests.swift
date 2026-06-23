@@ -93,6 +93,25 @@ final class EditorLauncherSecurityTests: XCTestCase {
         XCTAssertEqual(permissions.intValue & 0o777, 0o700)
     }
 
+    func testBenchmarkCleanLaunchArgsSeedsZedProfileToAvoidExtensionAutoInstall() throws {
+        let zed = try XCTUnwrap(findEditor(named: "Zed"))
+        let args = try benchmarkCleanLaunchArgs(
+            for: zed,
+            temporaryRoot: temporaryRoot.path,
+            uniqueSuffix: "fixture-zed"
+        )
+
+        let userDataIndex = try XCTUnwrap(args.firstIndex(of: "--user-data-dir"))
+        let profilePath = args[userDataIndex + 1]
+        let settingsPath = URL(fileURLWithPath: profilePath)
+            .appendingPathComponent("config", isDirectory: true)
+            .appendingPathComponent("settings.json")
+            .path
+        let settings = try String(contentsOfFile: settingsPath, encoding: .utf8)
+        XCTAssertTrue(settings.contains(#""auto_install_extensions""#))
+        XCTAssertTrue(settings.contains(#""html": false"#))
+    }
+
     func testBenchmarkCleanLaunchArgsRejectsSymlinkedProfileRootAndFallsBack() throws {
         let symlinkTarget = temporaryRoot.appendingPathComponent("symlink-target", isDirectory: true)
         try FileManager.default.createDirectory(at: symlinkTarget, withIntermediateDirectories: true)

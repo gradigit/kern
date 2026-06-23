@@ -957,6 +957,46 @@ final class NativeMarkdownCodecTests: XCTestCase {
     }
 
     @MainActor
+    func testRepeatedImageParagraphsUseDistinctAttachmentInstances() {
+        let markdown = """
+        ![Remote](https://example.com/mock-remote-image.png)
+
+        ![Remote](https://example.com/mock-remote-image.png)
+
+        ![Remote](https://example.com/mock-remote-image.png)
+        """
+
+        NativeMarkdownCodec.resetCachesForTesting()
+        defer { NativeMarkdownCodec.resetCachesForTesting() }
+
+        let imported = NativeMarkdownCodec.importMarkdown(markdown)
+        let attachments = imageAttachments(in: imported)
+
+        XCTAssertEqual(attachments.count, 3)
+        XCTAssertFalse(attachments[0] === attachments[1], "Image attachments carry mutable load/layout state and must not be shared through import caches")
+        XCTAssertFalse(attachments[1] === attachments[2], "Image attachments carry mutable load/layout state and must not be shared through import caches")
+    }
+
+    @MainActor
+    func testRepeatedImageListItemsUseDistinctAttachmentInstances() {
+        let markdown = """
+        - ![Remote](https://example.com/mock-remote-image.png)
+        - ![Remote](https://example.com/mock-remote-image.png)
+        - ![Remote](https://example.com/mock-remote-image.png)
+        """
+
+        NativeMarkdownCodec.resetCachesForTesting()
+        defer { NativeMarkdownCodec.resetCachesForTesting() }
+
+        let imported = NativeMarkdownCodec.importMarkdown(markdown)
+        let attachments = imageAttachments(in: imported)
+
+        XCTAssertEqual(attachments.count, 3)
+        XCTAssertFalse(attachments[0] === attachments[1], "Image attachments inside cached list blocks must remain distinct")
+        XCTAssertFalse(attachments[1] === attachments[2], "Image attachments inside cached list blocks must remain distinct")
+    }
+
+    @MainActor
     func testTableAttributedCacheSeparatesBaseURLContext() {
         let markdown = """
         | Link |
@@ -1262,6 +1302,16 @@ final class NativeMarkdownCodecTests: XCTestCase {
             guard let attachment = value as? MarkdownImageAttachment else { return }
             found = attachment
             stop.pointee = true
+        }
+        return found
+    }
+
+    private func imageAttachments(in attributed: NSAttributedString) -> [MarkdownImageAttachment] {
+        var found: [MarkdownImageAttachment] = []
+        let full = NSRange(location: 0, length: attributed.length)
+        attributed.enumerateAttribute(.attachment, in: full, options: []) { value, _, _ in
+            guard let attachment = value as? MarkdownImageAttachment else { return }
+            found.append(attachment)
         }
         return found
     }

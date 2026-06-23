@@ -40,23 +40,39 @@ func validateZedBenchReadyPayload(
     expectedMode: String,
     expectedPID: pid_t?
 ) -> String? {
+    validateBenchReadyPayload(
+        payload,
+        expectedTargetPath: expectedTargetPath,
+        expectedMode: expectedMode,
+        expectedPID: expectedPID,
+        reasonPrefix: "zed_bench_hook"
+    )
+}
+
+func validateBenchReadyPayload(
+    _ payload: ZedBenchReadyPayload,
+    expectedTargetPath: String,
+    expectedMode: String,
+    expectedPID: pid_t?,
+    reasonPrefix: String
+) -> String? {
     guard payload.event == "bench_ready" else {
-        return "zed_bench_hook_event_mismatch"
+        return "\(reasonPrefix)_event_mismatch"
     }
 
     let normalizedMode = payload.mode.trimmingCharacters(in: .whitespacesAndNewlines)
     if !expectedMode.isEmpty, normalizedMode != expectedMode {
-        return "zed_bench_hook_mode_mismatch"
+        return "\(reasonPrefix)_mode_mismatch"
     }
 
     let expectedPath = URL(fileURLWithPath: expectedTargetPath).standardizedFileURL.path.lowercased()
     let payloadPath = URL(fileURLWithPath: payload.target).standardizedFileURL.path.lowercased()
     if payloadPath != expectedPath {
-        return "zed_bench_hook_target_mismatch"
+        return "\(reasonPrefix)_target_mismatch"
     }
 
     guard payload.timestampMonotonicNs > 0 else {
-        return "zed_bench_hook_timestamp_invalid"
+        return "\(reasonPrefix)_timestamp_invalid"
     }
 
     // The forked Zed bench-ready signal is emitted from the process that handles the
@@ -73,16 +89,35 @@ func waitForZedBenchReady(
     expectedMode: String,
     expectedPID: pid_t?
 ) async -> ZedBenchReadyWaitResult {
+    await waitForBenchReady(
+        path: path,
+        timeout: timeout,
+        expectedTargetPath: expectedTargetPath,
+        expectedMode: expectedMode,
+        expectedPID: expectedPID,
+        reasonPrefix: "zed_bench_hook"
+    )
+}
+
+func waitForBenchReady(
+    path: String,
+    timeout: TimeInterval,
+    expectedTargetPath: String,
+    expectedMode: String,
+    expectedPID: pid_t?,
+    reasonPrefix: String
+) async -> ZedBenchReadyWaitResult {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(0.05, timeout) * 1_000_000_000)
     var lastFailureReason: String?
 
     while DispatchTime.now().uptimeNanoseconds < deadline {
         if let payload = loadZedBenchReadyPayload(from: path) {
-            if let failureReason = validateZedBenchReadyPayload(
+            if let failureReason = validateBenchReadyPayload(
                 payload,
                 expectedTargetPath: expectedTargetPath,
                 expectedMode: expectedMode,
-                expectedPID: expectedPID
+                expectedPID: expectedPID,
+                reasonPrefix: reasonPrefix
             ) {
                 lastFailureReason = failureReason
             } else {
@@ -94,6 +129,6 @@ func waitForZedBenchReady(
 
     return ZedBenchReadyWaitResult(
         payload: nil,
-        failureReason: lastFailureReason ?? "zed_bench_hook_timeout"
+        failureReason: lastFailureReason ?? "\(reasonPrefix)_timeout"
     )
 }

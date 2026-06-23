@@ -81,6 +81,26 @@ final class ZedBenchHookTests: XCTestCase {
         XCTAssertNil(reason)
     }
 
+    func testValidateBenchReadyUsesCustomReasonPrefix() {
+        let payload = ZedBenchReadyPayload(
+            event: "bench_ready",
+            target: "/tmp/doc.md",
+            mode: "textkit_text_assigned",
+            timestampMonotonicNs: 123,
+            pid: 42,
+            windowID: nil
+        )
+
+        let reason = validateBenchReadyPayload(
+            payload,
+            expectedTargetPath: "/tmp/doc.md",
+            expectedMode: "textkit_full_layout",
+            expectedPID: 42,
+            reasonPrefix: "textkit_bench_hook"
+        )
+        XCTAssertEqual(reason, "textkit_bench_hook_mode_mismatch")
+    }
+
     func testWaitForZedBenchReadyReturnsValidationFailureAfterTimeout() async throws {
         let tmp = try makeTempFilePath(name: "zed-hook-timeout.json")
         defer { try? FileManager.default.removeItem(atPath: tmp) }

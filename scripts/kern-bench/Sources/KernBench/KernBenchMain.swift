@@ -38,6 +38,7 @@ struct BenchConfig {
     var kernOpenMetricSource: KernOpenMetricSource = .auto
     var zedBenchHookMode: ZedBenchHookMode = .auto
     var zedBenchReadyMode = "first_editable"
+    var readinessCaptureDir: String?
     var verbose = false
 }
 
@@ -133,6 +134,11 @@ func parseArgs() -> BenchConfig {
             let mode = args.removeFirst().trimmingCharacters(in: .whitespacesAndNewlines)
             guard !mode.isEmpty else { exitUsage("--zed-ready-mode cannot be empty") }
             config.zedBenchReadyMode = mode
+        case "--readiness-capture-dir":
+            guard !args.isEmpty else { exitUsage("--readiness-capture-dir requires a path") }
+            let path = args.removeFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { exitUsage("--readiness-capture-dir cannot be empty") }
+            config.readinessCaptureDir = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
         case "--verbose", "-v":
             config.verbose = true
         case "--help", "-h":
@@ -183,6 +189,19 @@ func benchmarkInjectedOverrides(
     return pairs.isEmpty ? nil : pairs
 }
 
+func appLaunchEnvironment(
+    editorDisplayName: String,
+    wowMetricsPath: String?,
+    injectedOverrides: [String: String]? = benchmarkInjectedOverrides()
+) -> [String: String] {
+    guard editorDisplayName == "Kern" else { return [:] }
+    var env = injectedOverrides ?? [:]
+    if let wowMetricsPath {
+        env["KERN_WOW_INTERNAL_METRICS_PATH"] = wowMetricsPath
+    }
+    return env
+}
+
 func printUsage() {
     let usage = """
     kern-bench — Cross-editor benchmark tool
@@ -216,6 +235,8 @@ func printUsage() {
                                Kern open metric source: auto|wow|probe (default: auto)
       --zed-bench-hook <mode>  Zed bench-hook mode: auto|off|required (default: auto)
       --zed-ready-mode <mode>  Zed bench-ready mode label (default: first_editable)
+      --readiness-capture-dir <path>
+                               Diagnostic only: capture window screenshots before and after the suite readiness boundary
       --verbose, -v            Print per-stage details
       --help, -h               Show this help
 
@@ -602,6 +623,11 @@ struct KernBench {
                         .appendingPathComponent("zed-bench-ready-\(runIdx)-\(UUID().uuidString).json")
                         .path
                     : nil
+                let textKitBenchSignalPath = editor.displayName == "TextKit Baseline"
+                    ? URL(fileURLWithPath: NSTemporaryDirectory())
+                        .appendingPathComponent("textkit-bench-ready-\(runIdx)-\(UUID().uuidString).json")
+                        .path
+                    : nil
                 var failureReasons: [String: String] = [:]
                 var timeoutCount = 0
                 var failureCount = 0
@@ -674,6 +700,11 @@ struct KernBench {
                     unattributedOpenBudgetMs: Double?,
                     timeToStableLayoutMs: Double?,
                     postReadyExportQuiescenceMs: Double?,
+                    readinessSnapshotPrePath: String?,
+                    readinessSnapshotPreElapsedMs: Double?,
+                    readinessSnapshotPostPath: String?,
+                    readinessSnapshotPostElapsedMs: Double?,
+                    readinessSnapshotFailureReason: String?,
                     extraMetrics: [String: Double]?
                 ) {
                     // Single source of truth: suite.requiredMetrics.
@@ -738,6 +769,11 @@ struct KernBench {
                         unattributedOpenBudgetMs: unattributedOpenBudgetMs,
                         timeToStableLayoutMs: timeToStableLayoutMs,
                         postReadyExportQuiescenceMs: postReadyExportQuiescenceMs,
+                        readinessSnapshotPrePath: readinessSnapshotPrePath,
+                        readinessSnapshotPreElapsedMs: readinessSnapshotPreElapsedMs,
+                        readinessSnapshotPostPath: readinessSnapshotPostPath,
+                        readinessSnapshotPostElapsedMs: readinessSnapshotPostElapsedMs,
+                        readinessSnapshotFailureReason: readinessSnapshotFailureReason,
                         extraMetrics: extraMetrics,
                         runQuality: runQuality.rawValue,
                         stageTimeoutCount: timeoutCount,
@@ -790,6 +826,11 @@ struct KernBench {
                         unattributedOpenBudgetMs: nil,
                         timeToStableLayoutMs: nil,
                         postReadyExportQuiescenceMs: nil,
+                        readinessSnapshotPrePath: nil,
+                        readinessSnapshotPreElapsedMs: nil,
+                        readinessSnapshotPostPath: nil,
+                        readinessSnapshotPostElapsedMs: nil,
+                        readinessSnapshotFailureReason: nil,
                         extraMetrics: nil
                     )
                 }
@@ -828,16 +869,19 @@ struct KernBench {
                     if let zedBenchHookSignalPath {
                         try? FileManager.default.removeItem(atPath: zedBenchHookSignalPath)
                     }
+                    if let textKitBenchSignalPath {
+                        try? FileManager.default.removeItem(atPath: textKitBenchSignalPath)
+                    }
                     if editorIdx < shuffledEditors.count - 1, config.interEditorCooldownMs > 0 {
                         try? await Task.sleep(for: .milliseconds(config.interEditorCooldownMs))
                     }
                     continue
                 }
 
-                let launchEnv: [String: String] = {
-                    guard let wowMetricsPath else { return [:] }
-                    return ["KERN_WOW_INTERNAL_METRICS_PATH": wowMetricsPath]
-                }()
+                let launchEnv = appLaunchEnvironment(
+                    editorDisplayName: editor.displayName,
+                    wowMetricsPath: wowMetricsPath
+                )
                 let launchWindowOutcome = await performLaunchWindowAttempts(
                     launcher: launcher,
                     editor: editor,
@@ -849,7 +893,8 @@ struct KernBench {
                     openStageBudget: { stageBudget(stage: "open") },
                     deadlineReason: deadlineReason,
                     config: config,
-                    zedBenchHookSignalPath: zedBenchHookSignalPath
+                    zedBenchHookSignalPath: zedBenchHookSignalPath,
+                    textKitBenchSignalPath: textKitBenchSignalPath
                 )
                 let launchResult = launchWindowOutcome.launchResult
                 let window = launchWindowOutcome.window
@@ -879,6 +924,9 @@ struct KernBench {
                     if let zedBenchHookSignalPath {
                         try? FileManager.default.removeItem(atPath: zedBenchHookSignalPath)
                     }
+                    if let textKitBenchSignalPath {
+                        try? FileManager.default.removeItem(atPath: textKitBenchSignalPath)
+                    }
                     continue
                 }
 
@@ -903,6 +951,43 @@ struct KernBench {
                 var fullFidelityEndToEndLatencyMs: Double?
                 var runExtraMetrics: [String: Double]?
                 var preloadedWowMetrics: WowInternalMetricsPayload?
+                var readinessSnapshotPrePath: String?
+                var readinessSnapshotPreElapsedMs: Double?
+                var readinessSnapshotPostPath: String?
+                var readinessSnapshotPostElapsedMs: Double?
+                var readinessSnapshotFailureReason: String?
+
+                func appendReadinessSnapshotFailure(_ reason: String?) {
+                    guard let reason, !reason.isEmpty else { return }
+                    if readinessSnapshotFailureReason == nil {
+                        readinessSnapshotFailureReason = reason
+                    } else if readinessSnapshotFailureReason?.contains(reason) != true {
+                        readinessSnapshotFailureReason = "\(readinessSnapshotFailureReason!);\(reason)"
+                    }
+                }
+
+                func captureReadinessSnapshot(phase: String) {
+                    guard let captureDir = config.readinessCaptureDir else { return }
+                    let snapshot = captureWindowReadinessSnapshot(
+                        windowID: window.windowID,
+                        rootDirectory: captureDir,
+                        editorName: editor.displayName,
+                        runIndex: runIdx,
+                        phase: phase,
+                        launchNs: t0
+                    )
+                    switch phase {
+                    case "pre":
+                        readinessSnapshotPrePath = snapshot.path
+                        readinessSnapshotPreElapsedMs = snapshot.elapsedMs
+                    case "post":
+                        readinessSnapshotPostPath = snapshot.path
+                        readinessSnapshotPostElapsedMs = snapshot.elapsedMs
+                    default:
+                        break
+                    }
+                    appendReadinessSnapshotFailure(snapshot.failureReason)
+                }
 
                 if config.enableFrameMonitor && screencaptureAvailable && !config.noScreenCapture && !editor.isElectron {
                     print("  [\(editor.displayName)] run \(runIdx): frame monitor")
@@ -923,6 +1008,8 @@ struct KernBench {
                     verbose: config.verbose
                 )
 
+                captureReadinessSnapshot(phase: "pre")
+
                 let openBudget = stageBudget(stage: "open")
                 if openBudget <= 0 {
                     print("  [\(editor.displayName)] run \(runIdx): \(deadlineReason()) before open")
@@ -936,6 +1023,9 @@ struct KernBench {
                     }
                     if let zedBenchHookSignalPath {
                         try? FileManager.default.removeItem(atPath: zedBenchHookSignalPath)
+                    }
+                    if let textKitBenchSignalPath {
+                        try? FileManager.default.removeItem(atPath: textKitBenchSignalPath)
                     }
                     continue
                 }
@@ -1035,6 +1125,39 @@ struct KernBench {
                             timedOut: openReady.timedOut
                         )
                     }
+                } else if editor.displayName == "TextKit Baseline",
+                          let textKitBenchSignalPath {
+                    let mode = suite.id == .benchmarkFullFidelity
+                        ? "textkit_full_layout"
+                        : "textkit_text_assigned"
+                    let hookResult = await waitForBenchReady(
+                        path: textKitBenchSignalPath,
+                        timeout: openBudget,
+                        expectedTargetPath: runFile,
+                        expectedMode: mode,
+                        expectedPID: pid,
+                        reasonPrefix: "textkit_bench_hook"
+                    )
+                    if let payload = hookResult.payload {
+                        let hookReadyNs = max(payload.timestampMonotonicNs, t0)
+                        let value = max(
+                            windowVisibleMs,
+                            Double(hookReadyNs - t0) / 1_000_000
+                        )
+                        openLatencyMs = value
+                        openStage = StageResult(valueMs: value, failureReason: nil, timedOut: false)
+                        if suite.id == .benchmarkFullFidelity {
+                            fullFidelityEndToEndLatencyMs = value
+                        }
+                    } else {
+                        let reason = hookResult.failureReason ?? "textkit_bench_hook_timeout"
+                        openLatencyMs = nil
+                        openStage = StageResult(
+                            valueMs: nil,
+                            failureReason: reason,
+                            timedOut: reason.contains("timeout")
+                        )
+                    }
                 } else {
                     let openReadyRaw = await actionRunner.runOpenReadiness(
                         timeout: openBudget,
@@ -1062,6 +1185,10 @@ struct KernBench {
                 if config.postOpenDelayMs > 0 {
                     print("  [\(editor.displayName)] run \(runIdx): debug post-open delay \(config.postOpenDelayMs)ms")
                     try? await Task.sleep(for: .milliseconds(config.postOpenDelayMs))
+                }
+
+                if suite.id != .benchmarkFullFidelity {
+                    captureReadinessSnapshot(phase: "post")
                 }
 
                 let typing: StageResult
@@ -1219,6 +1346,16 @@ struct KernBench {
                                 timedOut: openStage.timedOut
                             )
                         }
+                        if editor.displayName == "TextKit Baseline" {
+                            if let value = fullFidelityEndToEndLatencyMs {
+                                return StageResult(valueMs: value, failureReason: nil, timedOut: false)
+                            }
+                            return StageResult(
+                                valueMs: nil,
+                                failureReason: openStage.failureReason ?? "textkit_full_fidelity_unavailable",
+                                timedOut: openStage.timedOut
+                            )
+                        }
                         if let renderStableMs {
                             fullFidelityEndToEndLatencyMs = renderStableMs
                             return StageResult(valueMs: renderStableMs, failureReason: nil, timedOut: false)
@@ -1233,6 +1370,7 @@ struct KernBench {
                         timedOut: fullFidelityStage.timedOut
                     )
                     markFailure("full_fidelity_end_to_end_latency_ms", fullFidelityStage)
+                    captureReadinessSnapshot(phase: "post")
                 }
 
                 let quit: StageResult
@@ -1309,6 +1447,11 @@ struct KernBench {
                     unattributedOpenBudgetMs: unattributedOpenBudgetMs,
                     timeToStableLayoutMs: timeToStableLayoutMs,
                     postReadyExportQuiescenceMs: postReadyExportQuiescenceMs,
+                    readinessSnapshotPrePath: readinessSnapshotPrePath,
+                    readinessSnapshotPreElapsedMs: readinessSnapshotPreElapsedMs,
+                    readinessSnapshotPostPath: readinessSnapshotPostPath,
+                    readinessSnapshotPostElapsedMs: readinessSnapshotPostElapsedMs,
+                    readinessSnapshotFailureReason: readinessSnapshotFailureReason,
                     extraMetrics: runExtraMetrics
                 )
 
@@ -1322,6 +1465,9 @@ struct KernBench {
                 }
                 if let zedBenchHookSignalPath {
                     try? FileManager.default.removeItem(atPath: zedBenchHookSignalPath)
+                }
+                if let textKitBenchSignalPath {
+                    try? FileManager.default.removeItem(atPath: textKitBenchSignalPath)
                 }
 
                 if editorIdx < shuffledEditors.count - 1, config.interEditorCooldownMs > 0 {

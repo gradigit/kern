@@ -182,6 +182,17 @@ Benchmark artifacts are written to:
 # - Defaults: Zed hook required + styled_stable mode
 ./scripts/cross-editor-benchmark.sh --suite benchmark_full_fidelity --runs 10
 
+# Diagnostic native TextKit lower-bound comparison.
+# This adds a local plain NSTextView app that reads the same file and writes a deterministic
+# bench_ready signal after text assignment / full TextKit layout. This is not WYSIWYG Markdown
+# parity and is not claim-safe for public Kern-vs-Zed headline claims.
+./scripts/cross-editor-benchmark.sh \
+  --suite benchmark_full_fidelity \
+  --editors "Kern,Zed,TextKit Baseline" \
+  --runs 10 \
+  --warmup-runs 1 \
+  --inter-editor-delay-ms 1500
+
 # Optional deterministic profile for full-fidelity stability studies
 ./scripts/cross-editor-benchmark.sh --suite benchmark_full_fidelity --profile full-fidelity-stable --runs 10
 
@@ -297,6 +308,9 @@ python3 scripts/bench-regression-check.py --baseline baseline.json --latest late
 - **No outlier removal**: raw data is preserved; the slow tail IS the user experience
 - **Frame monitor probes are opt-in** (`--enable-frame-monitor`) to keep default suite runtime fast
 - **Zed bench hook path**: `--zed-bench-hook auto|off|required` uses fork hook when available, with automatic fallback in `auto`
+- **Readiness screenshots are diagnostic-only** (`--readiness-capture-dir <dir>`): captures a pre-readiness and post-readiness window image per measured run. Do not use screenshot-enabled runs for claim-safe timing because `screencapture` can perturb latency.
+- **Zed isolated profiles are preseeded** with `auto_install_extensions.html=false` so fresh benchmark profiles do not benchmark background HTML-extension installation/network work.
+- **TextKit Baseline** is an optional local diagnostic editor (`TextKitBenchEditor`) built with `scripts/kern-bench`. It uses native AppKit/TextKit plain `NSTextView`, writes the same `bench_ready` payload schema as the Zed fork, and reports `textkit_text_assigned` for open-ready or `textkit_full_layout` for full-fidelity. Treat it as a lower-bound native TextKit comparison, not a Markdown/WYSIWYG parity competitor.
 - **Full-fidelity aside defaults** (`--suite benchmark_full_fidelity`):
   - `--zed-bench-hook required`
   - `--zed-ready-mode styled_stable`
@@ -349,6 +363,7 @@ Before any benchmark run:
 - [ ] Run `./scripts/cross-editor-benchmark.sh --suite benchmark_open_ready --preflight-only --runs 10`
       and, for full-fidelity work, `./scripts/cross-editor-benchmark.sh --suite benchmark_full_fidelity --preflight-only --runs 10`
       before launching a real claim run
+- [ ] For metric validation, run one diagnostic pass with `--readiness-capture-dir <dir>` and visually confirm pre-captures are not loaded while post-captures are loaded. Keep that diagnostic separate from the hard-stat run.
 
 ## JSON Schema (v4)
 
@@ -445,6 +460,7 @@ Before any benchmark run:
 - **Open-ready aside** (`--suite benchmark_open_ready`): optional open-readiness comparison (defaults to Kern+Zed, large frozen fixture, no save/quit steps)
 - **Full-fidelity aside** (`--suite benchmark_full_fidelity`): optional large-fixture full-fidelity completion comparison (defaults to Kern+Zed)
 - **Microbenchmark suite** (`--suite wow_internal`): non-official Kern-only stage microbenchmark (`suite_kind=internal_microbenchmark`)
+- **TextKit Baseline** is optional and diagnostic-only; adding it to an aside roster intentionally classifies the overall run as Partial because the claim-safe full-fidelity roster is exactly Kern+Zed.
 - `wow_internal` defaults to the small frozen fixture (`cross-editor-benchmark.md`) for minimum-latency numbers.
 - `wow_internal` defaults: 10 measured runs, 0 warmups.
 - Legacy aliases (`wow`, `real_use`) map to `benchmark` only

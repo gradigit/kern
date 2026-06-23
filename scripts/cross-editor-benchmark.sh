@@ -28,6 +28,7 @@ PREFLIGHT_ONLY=false
 KERN_OPEN_METRIC_SOURCE=""
 ZED_BENCH_HOOK=""
 ZED_READY_MODE=""
+READINESS_CAPTURE_DIR=""
 SELECTED_EDITORS=()
 USES_ALL_EDITORS=false
 NEEDS_ZED=false
@@ -117,6 +118,11 @@ register_cleanup_target_for_editor() {
       append_unique_value CLEANUP_APP_NAMES "TextEdit"
       append_unique_value CLEANUP_PROCESS_NAMES "TextEdit"
       append_unique_value CLEANUP_BUNDLE_IDS "com.apple.TextEdit"
+      ;;
+    "textkit baseline")
+      append_unique_value CLEANUP_PROCESS_NAMES "TextKitBenchEditor"
+      append_unique_value CLEANUP_FULL_PATHS "$(pwd)/scripts/kern-bench/.build/release/TextKitBenchEditor"
+      append_unique_value CLEANUP_FULL_PATHS "$(pwd)/scripts/kern-bench/.build/debug/TextKitBenchEditor"
       ;;
     typora)
       append_unique_value CLEANUP_APP_NAMES "Typora"
@@ -457,8 +463,8 @@ inject_profile_override_if_unset() {
   local value="$2"
   if [[ -z "${!key:-}" ]]; then
     export "$key=$value"
-    INJECTED_OVERRIDE_PAIRS+=("${key}=${value}")
   fi
+  INJECTED_OVERRIDE_PAIRS+=("${key}=${!key}")
 }
 
 editor_list_includes_zed() {
@@ -580,6 +586,7 @@ while [[ $# -gt 0 ]]; do
     --kern-open-metric-source) KERN_OPEN_METRIC_SOURCE="$2"; shift 2 ;;
     --zed-bench-hook) ZED_BENCH_HOOK="$2"; shift 2 ;;
     --zed-ready-mode) ZED_READY_MODE="$2"; shift 2 ;;
+    --readiness-capture-dir) READINESS_CAPTURE_DIR="$2"; shift 2 ;;
     --profile) BENCH_PROFILE="$2"; shift 2 ;;
     --verbose|-v) VERBOSE=true; shift ;;
     --file) FILE="$2"; shift 2 ;;
@@ -614,6 +621,8 @@ Options:
                         Kern open metric source: auto|wow|probe
   --zed-bench-hook MODE  Zed hook mode: auto|off|required
   --zed-ready-mode MODE  Zed bench-ready mode label
+  --readiness-capture-dir PATH
+                        Diagnostic only: capture before/after readiness window screenshots
   --profile NAME         Benchmark profile (default|full-fidelity-stable)
   --verbose, -v         Verbose output
   --file PATH           Benchmark fixture file
@@ -753,6 +762,10 @@ esac
 if [[ -n "$KERN_OPEN_METRIC_SOURCE" ]]; then CMD+=("--kern-open-metric-source" "$KERN_OPEN_METRIC_SOURCE"); fi
 if [[ -n "$ZED_BENCH_HOOK" ]]; then CMD+=("--zed-bench-hook" "$ZED_BENCH_HOOK"); fi
 if [[ -n "$ZED_READY_MODE" ]]; then CMD+=("--zed-ready-mode" "$ZED_READY_MODE"); fi
+if [[ -n "$READINESS_CAPTURE_DIR" ]]; then
+  mkdir -p "$READINESS_CAPTURE_DIR"
+  CMD+=("--readiness-capture-dir" "$READINESS_CAPTURE_DIR")
+fi
 if [[ "$VERBOSE" == true ]]; then CMD+=("--verbose"); fi
 
 if [[ ${#EDITOR_ARGS[@]} -gt 0 ]]; then

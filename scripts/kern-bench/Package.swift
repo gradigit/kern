@@ -16,6 +16,13 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
             ]
         ),
+        .executableTarget(
+            name: "TextKitBenchEditor",
+            path: "Sources/TextKitBenchEditor",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+            ]
+        ),
         .testTarget(
             name: "KernBenchTests",
             dependencies: ["kern-bench"],

@@ -247,19 +247,123 @@ enum NativeMarkdownCodec {
         }
     }
 
+    private final class ParagraphAttributedCache: @unchecked Sendable {
+        private let maxEntries: Int
+        private let maxApproximateUTF16Cost: Int
+        private let lock = NSLock()
+        private var storage: [ParagraphAttributedCacheKey: NSAttributedString] = [:]
+        private var storageCosts: [ParagraphAttributedCacheKey: Int] = [:]
+        private var totalApproximateUTF16Cost: Int = 0
+
+        init(maxEntries: Int, maxApproximateUTF16Cost: Int) {
+            self.maxEntries = max(512, maxEntries)
+            self.maxApproximateUTF16Cost = max(1_048_576, maxApproximateUTF16Cost)
+        }
+
+        func value(for key: ParagraphAttributedCacheKey) -> NSAttributedString? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[key]
+        }
+
+        func insert(_ value: NSAttributedString, for key: ParagraphAttributedCacheKey) {
+            lock.lock()
+            defer { lock.unlock() }
+            let approximateCost = key.text.utf16.count + value.length
+            if let existingCost = storageCosts[key] {
+                totalApproximateUTF16Cost = max(0, totalApproximateUTF16Cost - existingCost)
+            } else if storage.count >= maxEntries
+                        || totalApproximateUTF16Cost + approximateCost > maxApproximateUTF16Cost {
+                storage.removeAll(keepingCapacity: true)
+                storageCosts.removeAll(keepingCapacity: true)
+                totalApproximateUTF16Cost = 0
+            }
+            storage[key] = value
+            storageCosts[key] = approximateCost
+            totalApproximateUTF16Cost += approximateCost
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.removeAll(keepingCapacity: true)
+            storageCosts.removeAll(keepingCapacity: true)
+            totalApproximateUTF16Cost = 0
+        }
+    }
+
+    private final class RenderedBlockAttributedCache: @unchecked Sendable {
+        private let maxEntries: Int
+        private let maxApproximateUTF16Cost: Int
+        private let lock = NSLock()
+        private var storage: [RenderedBlockAttributedCacheKey: NSAttributedString] = [:]
+        private var storageCosts: [RenderedBlockAttributedCacheKey: Int] = [:]
+        private var totalApproximateUTF16Cost: Int = 0
+
+        init(maxEntries: Int, maxApproximateUTF16Cost: Int) {
+            self.maxEntries = max(512, maxEntries)
+            self.maxApproximateUTF16Cost = max(1_048_576, maxApproximateUTF16Cost)
+        }
+
+        func value(for key: RenderedBlockAttributedCacheKey) -> NSAttributedString? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[key]
+        }
+
+        func insert(_ value: NSAttributedString, for key: RenderedBlockAttributedCacheKey) {
+            lock.lock()
+            defer { lock.unlock() }
+            let approximateCost = key.text.utf16.count + value.length
+            if let existingCost = storageCosts[key] {
+                totalApproximateUTF16Cost = max(0, totalApproximateUTF16Cost - existingCost)
+            } else if storage.count >= maxEntries
+                        || totalApproximateUTF16Cost + approximateCost > maxApproximateUTF16Cost {
+                storage.removeAll(keepingCapacity: true)
+                storageCosts.removeAll(keepingCapacity: true)
+                totalApproximateUTF16Cost = 0
+            }
+            storage[key] = value
+            storageCosts[key] = approximateCost
+            totalApproximateUTF16Cost += approximateCost
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.removeAll(keepingCapacity: true)
+            storageCosts.removeAll(keepingCapacity: true)
+            totalApproximateUTF16Cost = 0
+        }
+    }
+
     /// Shared inline parse cache reused across import passes (including staged promotions).
     /// This preserves hot repeated fragments (e.g. emphasis/link patterns in benchmark fixtures)
     /// across successive slice imports instead of rewarming from empty each pass.
     private static let sharedInlineParseCache = InlineParseCache(
-        maxEntries: 18_000,
-        maxApproximateUTF16Cost: 8_000_000
+        maxEntries: 48_000,
+        maxApproximateUTF16Cost: 16_000_000
     )
     /// Shared code-block attributed cache reused across import passes.
     /// This is most valuable for large fixtures with repeated fenced blocks or repeated staged-promotion imports.
-    private static let sharedCodeBlockAttributedCache = CodeBlockAttributedCache(maxEntries: 512)
+    private static let sharedCodeBlockAttributedCache = CodeBlockAttributedCache(maxEntries: 4_096)
     /// Shared table attributed cache reused across import passes.
     /// This is most valuable when large fixtures contain repeated identical table blocks.
-    private static let sharedTableAttributedCache = TableAttributedCache(maxEntries: 256)
+    private static let sharedTableAttributedCache = TableAttributedCache(maxEntries: 1_024)
+    /// Shared ordinary-paragraph cache reused across import passes.
+    /// The large benchmark fixture repeats many paragraph bodies across staged slices; caching the
+    /// block-attributed form avoids rebuilding paragraph styles and inline content for exact repeats.
+    private static let sharedParagraphAttributedCache = ParagraphAttributedCache(
+        maxEntries: 24_000,
+        maxApproximateUTF16Cost: 24_000_000
+    )
+    /// Shared rendered block cache for exact repeated headings/list items/tasks/callouts.
+    /// Call sites copy cached values before quote mutations; values containing attachments are
+    /// deliberately excluded because attachment subclasses carry mutable load/layout state.
+    private static let sharedRenderedBlockAttributedCache = RenderedBlockAttributedCache(
+        maxEntries: 18_000,
+        maxApproximateUTF16Cost: 18_000_000
+    )
 
     @inline(__always)
     private static func measureImportPhase<T>(
@@ -497,13 +601,6 @@ enum NativeMarkdownCodec {
             let combined: String
             let nextIndex: Int
             let containsInlineSyntax: Bool
-        }
-
-        func makeInlineContent(_ body: CollectedContinuationBody, baseFont: NSFont) -> NSAttributedString {
-            if !ctx.strictConformanceRoundTripMode, !body.containsInlineSyntax {
-                return makeInlineAttributed(body.combined, baseFont: baseFont, style: InlineStyle())
-            }
-            return parseInline(body.combined, baseFont: baseFont, ctx: ctx)
         }
 
         func collectParagraphBody(startIndex: Int, firstLine line: String, quoteDepth: Int) -> CollectedContinuationBody {
@@ -747,8 +844,14 @@ enum NativeMarkdownCodec {
                         let paragraphBody = collectParagraphBody(startIndex: i, firstLine: line, quoteDepth: quoteDepth)
                         let j = paragraphBody.nextIndex
 
-                        let para = NSMutableAttributedString(attributedString: makeInlineContent(paragraphBody, baseFont: baseFont))
-                        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                        let para = NSMutableAttributedString(
+                            attributedString: makeParagraphAttributed(
+                                paragraphBody.combined,
+                                containsInlineSyntax: paragraphBody.containsInlineSyntax,
+                                baseFont: baseFont,
+                                ctx: ctx
+                            )
+                        )
                         applyQuoteAttributes(para, quoteDepth: quoteDepth)
                         result.append(para)
                         if j - 1 < lines.count - 1 {
@@ -1477,8 +1580,14 @@ enum NativeMarkdownCodec {
                     let paragraphBody = collectParagraphBody(startIndex: i, firstLine: line, quoteDepth: quoteDepth)
                     let j = paragraphBody.nextIndex
 
-                    let para = NSMutableAttributedString(attributedString: makeInlineContent(paragraphBody, baseFont: baseFont))
-                    applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+                    let para = NSMutableAttributedString(
+                        attributedString: makeParagraphAttributed(
+                            paragraphBody.combined,
+                            containsInlineSyntax: paragraphBody.containsInlineSyntax,
+                            baseFont: baseFont,
+                            ctx: ctx
+                        )
+                    )
                     applyQuoteAttributes(para, quoteDepth: quoteDepth)
                     result.append(para)
                     if j - 1 < lines.count - 1 {
@@ -2261,6 +2370,8 @@ enum NativeMarkdownCodec {
         sharedInlineParseCache.removeAll()
         sharedCodeBlockAttributedCache.removeAll()
         sharedTableAttributedCache.removeAll()
+        sharedParagraphAttributedCache.removeAll()
+        sharedRenderedBlockAttributedCache.removeAll()
     }
 
     private static let largeDocumentPlainImportThreshold = 1_000_000
@@ -3419,6 +3530,58 @@ enum NativeMarkdownCodec {
 
     // MARK: - Block rendering
 
+    private static func renderedBlockCacheKey(
+        kind: String,
+        text: String,
+        marker: String = "",
+        markerPadding: String = "",
+        indent: Int = 0,
+        depth: Int = 0,
+        index: Int = 0,
+        level: Int = 0,
+        checked: Bool = false,
+        taskStyleRawValue: Int = -1,
+        taskRenderingRawValue: String = "",
+        containsInlineSyntax: Bool,
+        baseFont: NSFont,
+        ctx: ImportContext
+    ) -> RenderedBlockAttributedCacheKey {
+        RenderedBlockAttributedCacheKey(
+            kind: kind,
+            text: text,
+            marker: marker,
+            markerPadding: markerPadding,
+            indent: max(0, indent),
+            depth: max(0, depth),
+            index: max(0, index),
+            level: max(0, level),
+            checked: checked,
+            taskStyleRawValue: taskStyleRawValue,
+            taskRenderingRawValue: taskRenderingRawValue,
+            containsInlineSyntax: containsInlineSyntax,
+            fontName: baseFont.fontName,
+            pointSize: baseFont.pointSize,
+            themeSignature: ctx.themeSignature,
+            baseURLSignature: ctx.baseURLSignature,
+            referenceDefinitionsSignature: ctx.referenceDefinitionsSignature,
+            remoteImageLoadingEnabled: ctx.options.remoteImageLoadingEnabled
+        )
+    }
+
+    private static func cachedRenderedBlock(
+        key: RenderedBlockAttributedCacheKey,
+        build: () -> NSAttributedString
+    ) -> NSAttributedString {
+        if let cached = sharedRenderedBlockAttributedCache.value(for: key) {
+            return cached
+        }
+        let built = NSAttributedString(attributedString: build())
+        if !containsAttachment(built) {
+            sharedRenderedBlockAttributedCache.insert(built, for: key)
+        }
+        return built
+    }
+
     private static func makeCalloutParagraph(
         kind: KernCalloutKind,
         text: String,
@@ -3426,6 +3589,15 @@ enum NativeMarkdownCodec {
         baseFont: NSFont,
         ctx: ImportContext
     ) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "callout",
+            text: text,
+            marker: kind.rawValue,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
 
         var markerAttrs = baseAttributes(baseFont: baseFont)
@@ -3452,6 +3624,7 @@ enum NativeMarkdownCodec {
             )
         }
         return para
+        }
     }
 
     private static func makeTaskParagraph(
@@ -3463,6 +3636,21 @@ enum NativeMarkdownCodec {
         options: Options,
         ctx: ImportContext
     ) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "task",
+            text: task.text,
+            marker: task.marker.map(String.init) ?? "",
+            markerPadding: task.markerPadding,
+            indent: indent,
+            depth: depth,
+            checked: task.checked,
+            taskStyleRawValue: task.style.rawValue,
+            taskRenderingRawValue: options.taskRendering.rawValue,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
         let markerTemplate = listMarkerPrefixTemplate(
             kind: task.style == .bulleted && options.taskRendering == .kern
@@ -3493,6 +3681,7 @@ enum NativeMarkdownCodec {
             }
         }
         return para
+        }
     }
 
     private static func makeHeadingWithCheckbox(
@@ -3503,6 +3692,16 @@ enum NativeMarkdownCodec {
         baseFont: NSFont,
         ctx: ImportContext
     ) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "headingCheckbox",
+            text: text,
+            level: level,
+            checked: checked,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
 
         let heading = headingFont(level: level)
@@ -3539,9 +3738,22 @@ enum NativeMarkdownCodec {
         }
 
         return para
+        }
     }
 
     private static func makeBulletParagraph(_ text: String, marker: Character, markerPadding: String, indent: Int, depth: Int, baseFont: NSFont, containsInlineSyntax: Bool, ctx: ImportContext) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "bullet",
+            text: text,
+            marker: String(marker),
+            markerPadding: markerPadding,
+            indent: indent,
+            depth: depth,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
         let markerTemplate = listMarkerPrefixTemplate(kind: .bullet, baseFont: baseFont)
         para.append(markerTemplate.attributed)
@@ -3553,6 +3765,7 @@ enum NativeMarkdownCodec {
         para.addAttribute(.kernListMarkerPadding, value: markerPadding, range: NSRange(location: 0, length: min(1, para.length)))
         applyBlockAttributes(para, kind: .bullet, baseFont: baseFont, headingLevel: nil)
         return para
+        }
     }
 
     private static func makeCodeBlockAttributed(
@@ -4037,6 +4250,18 @@ enum NativeMarkdownCodec {
     }
 
     private static func makeOrderedParagraph(_ ordered: (index: Int, markerPadding: String, text: String), indent: Int, depth: Int, baseFont: NSFont, containsInlineSyntax: Bool, ctx: ImportContext) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "ordered",
+            text: ordered.text,
+            markerPadding: ordered.markerPadding,
+            indent: indent,
+            depth: depth,
+            index: ordered.index,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
         let marker = orderedDisplayMarker(index: max(0, ordered.index), depth: depth)
         let markerTemplate = listMarkerPrefixTemplate(kind: .ordered(marker: marker, depth: depth), baseFont: baseFont)
@@ -4052,6 +4277,7 @@ enum NativeMarkdownCodec {
         para.addAttribute(.kernOrderedIndex, value: max(0, ordered.index), range: NSRange(location: 0, length: min(markerTemplate.markerLength, para.length)))
 
         return para
+        }
     }
 
     private static func orderedDisplayMarker(index: Int, depth: Int) -> String {
@@ -4119,6 +4345,18 @@ enum NativeMarkdownCodec {
         containsInlineSyntax: Bool,
         ctx: ImportContext
     ) -> NSAttributedString {
+        let cacheKey = renderedBlockCacheKey(
+            kind: "orderedTask",
+            text: orderedTask.text,
+            indent: indent,
+            depth: depth,
+            index: orderedTask.index,
+            checked: orderedTask.checked,
+            containsInlineSyntax: containsInlineSyntax,
+            baseFont: baseFont,
+            ctx: ctx
+        )
+        return cachedRenderedBlock(key: cacheKey) {
         let para = NSMutableAttributedString()
 
         var markerAttrs = baseAttributes(baseFont: baseFont).merging(
@@ -4160,6 +4398,7 @@ enum NativeMarkdownCodec {
         }
 
         return para
+        }
     }
 
     private static func headingFont(level: Int) -> NSFont {
@@ -4304,6 +4543,39 @@ enum NativeMarkdownCodec {
         let fontName: String
         let pointSize: CGFloat
         let terminateLastParagraph: Bool
+        let themeSignature: String
+        let baseURLSignature: String
+        let referenceDefinitionsSignature: Int
+        let remoteImageLoadingEnabled: Bool
+    }
+
+    private struct ParagraphAttributedCacheKey: Hashable {
+        let text: String
+        let fontName: String
+        let pointSize: CGFloat
+        let containsInlineSyntax: Bool
+        let strictConformanceRoundTripMode: Bool
+        let themeSignature: String
+        let baseURLSignature: String
+        let referenceDefinitionsSignature: Int
+        let remoteImageLoadingEnabled: Bool
+    }
+
+    private struct RenderedBlockAttributedCacheKey: Hashable {
+        let kind: String
+        let text: String
+        let marker: String
+        let markerPadding: String
+        let indent: Int
+        let depth: Int
+        let index: Int
+        let level: Int
+        let checked: Bool
+        let taskStyleRawValue: Int
+        let taskRenderingRawValue: String
+        let containsInlineSyntax: Bool
+        let fontName: String
+        let pointSize: CGFloat
         let themeSignature: String
         let baseURLSignature: String
         let referenceDefinitionsSignature: Int
@@ -4621,6 +4893,59 @@ enum NativeMarkdownCodec {
         return parseInline(text, baseFont: baseFont, ctx: ctx)
     }
 
+    private static func makeParagraphAttributed(
+        _ text: String,
+        containsInlineSyntax: Bool,
+        baseFont: NSFont,
+        ctx: ImportContext
+    ) -> NSAttributedString {
+        let cacheKey = ParagraphAttributedCacheKey(
+            text: text,
+            fontName: baseFont.fontName,
+            pointSize: baseFont.pointSize,
+            containsInlineSyntax: containsInlineSyntax,
+            strictConformanceRoundTripMode: ctx.strictConformanceRoundTripMode,
+            themeSignature: ctx.themeSignature,
+            baseURLSignature: ctx.baseURLSignature,
+            referenceDefinitionsSignature: ctx.referenceDefinitionsSignature,
+            remoteImageLoadingEnabled: ctx.options.remoteImageLoadingEnabled
+        )
+        if let cached = sharedParagraphAttributedCache.value(for: cacheKey) {
+            return cached
+        }
+
+        let para = NSMutableAttributedString(
+            attributedString: makeInlineContent(
+                text,
+                baseFont: baseFont,
+                containsInlineSyntax: containsInlineSyntax,
+                ctx: ctx
+            )
+        )
+        applyBlockAttributes(para, kind: .paragraph, baseFont: baseFont, headingLevel: nil)
+        let frozen = NSAttributedString(attributedString: para)
+        if !containsAttachment(frozen) {
+            sharedParagraphAttributedCache.insert(frozen, for: cacheKey)
+        }
+        return frozen
+    }
+
+    private static func containsAttachment(_ attributed: NSAttributedString) -> Bool {
+        guard attributed.length > 0 else { return false }
+        var found = false
+        attributed.enumerateAttribute(
+            .attachment,
+            in: NSRange(location: 0, length: attributed.length),
+            options: []
+        ) { value, _, stop in
+            if value != nil {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
     private static func parseAutolinkURL<S: StringProtocol>(_ inner: S) -> URL? {
         // CommonMark autolinks disallow whitespace.
         if inner.contains(where: { $0.isWhitespace }) { return nil }
@@ -4726,7 +5051,9 @@ enum NativeMarkdownCodec {
 
         if let rangeFirst = parseInlineRangeFirstPhase1(text, baseFont: baseFont, style: style, ctx: ctx) {
             if let inlineCache, let cacheKey {
-                inlineCache.insert(rangeFirst, for: cacheKey)
+                if !containsAttachment(rangeFirst) {
+                    inlineCache.insert(rangeFirst, for: cacheKey)
+                }
                 return rangeFirst
             }
             return rangeFirst
@@ -4737,7 +5064,11 @@ enum NativeMarkdownCodec {
         if let inlineCache, let cacheKey {
             // The parser never mutates returned attributed strings after construction.
             // Reusing the same instance avoids an extra defensive copy on hot paths.
-            inlineCache.insert(out, for: cacheKey)
+            // NSTextAttachment subclasses keep mutable load/layout state, so never share them
+            // through the inline cache across paragraphs or editor instances.
+            if !containsAttachment(out) {
+                inlineCache.insert(out, for: cacheKey)
+            }
             return out
         }
         return out
@@ -4815,10 +5146,7 @@ enum NativeMarkdownCodec {
         while index < text.endIndex {
             let ch = text[index]
 
-            if ch != "\\" && ch != "<" && ch != "`" && ch != "[" {
-                if ch == "!" || ch == "$" || ch == "*" || ch == "_" || ch == "~" {
-                    return nil
-                }
+            if ch != "\\" && ch != "!" && ch != "<" && ch != "[" && ch != "$" && ch != "`" && ch != "*" && ch != "_" && ch != "~" {
                 index = text.index(after: index)
                 continue
             }
@@ -4853,6 +5181,27 @@ enum NativeMarkdownCodec {
                 continue
             }
 
+            if ch == "!" {
+                if let image = parseImageRangeFirst(text, startIndex: index, ctx: ctx) {
+                    out.append(
+                        measureImportPhase(.makeImageAttachmentAttributed, profiler: ctx.profiler) {
+                            makeImageAttachmentAttributed(
+                                alt: image.alt,
+                                destination: image.destination,
+                                sourceMarkdown: image.sourceMarkdown,
+                                baseFont: baseFont,
+                                ctx: ctx
+                            )
+                        }
+                    )
+                    index = image.nextIndex
+                    literalStart = index
+                    continue
+                }
+                index = text.index(after: index)
+                continue
+            }
+
             if ch == "<" {
                 if let parsed = parseHtmlLineBreakRangeFirst(text, startIndex: index) {
                     appendHtmlLineBreak(sourceMarkdown: String(text[index..<parsed.nextIndex]))
@@ -4872,6 +5221,17 @@ enum NativeMarkdownCodec {
                             style: nextStyle
                         )
                     )
+                    index = parsed.nextIndex
+                    literalStart = index
+                    continue
+                }
+                index = text.index(after: index)
+                continue
+            }
+
+            if ch == "$" {
+                if let parsed = parseInlineMathRangeFirst(text, startIndex: index, baseFont: baseFont) {
+                    out.append(parsed.attributed)
                     index = parsed.nextIndex
                     literalStart = index
                     continue
@@ -4915,6 +5275,80 @@ enum NativeMarkdownCodec {
                 index = runEnd
                 continue
             }
+
+            if (ch == "*" || ch == "_"),
+               let third = text.index(index, offsetBy: 2, limitedBy: text.endIndex),
+               third < text.endIndex,
+               text[text.index(after: index)] == ch,
+               text[third] == ch,
+               canOpenDelimiterRangeFirst(ch, count: 3, in: text, at: index, lowerBound: text.startIndex, upperBound: text.endIndex),
+               let end = findClosingDelimiterRangeFirst(ch, count: 3, in: text, start: text.index(after: third), lowerBound: text.startIndex, limit: text.endIndex)
+            {
+                let innerRange = text.index(after: third)..<end
+                if isValidInlineDelimitedContentRangeFirst(text, range: innerRange) {
+                    var nextStyle = style
+                    nextStyle.strong.toggle()
+                    nextStyle.emphasis.toggle()
+                    out.append(parseInline(String(text[innerRange]), baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    index = text.index(end, offsetBy: 3)
+                    literalStart = index
+                    continue
+                }
+            }
+
+            if ch == "~",
+               let second = text.index(index, offsetBy: 1, limitedBy: text.endIndex),
+               second < text.endIndex,
+               text[second] == "~",
+               let end = findClosingDelimiterRangeFirst("~", count: 2, in: text, start: text.index(after: second), lowerBound: text.startIndex, limit: text.endIndex)
+            {
+                let innerRange = text.index(after: second)..<end
+                if !innerRange.isEmpty {
+                    var nextStyle = style
+                    nextStyle.strike.toggle()
+                    out.append(parseInline(String(text[innerRange]), baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    index = text.index(end, offsetBy: 2)
+                    literalStart = index
+                    continue
+                }
+            }
+
+            if (ch == "*" || ch == "_"),
+               let second = text.index(index, offsetBy: 1, limitedBy: text.endIndex),
+               second < text.endIndex,
+               text[second] == ch,
+               canOpenDelimiterRangeFirst(ch, count: 2, in: text, at: index, lowerBound: text.startIndex, upperBound: text.endIndex),
+               let end = findClosingDelimiterRangeFirst(ch, count: 2, in: text, start: text.index(after: second), lowerBound: text.startIndex, limit: text.endIndex)
+            {
+                let innerRange = text.index(after: second)..<end
+                if isValidInlineDelimitedContentRangeFirst(text, range: innerRange) {
+                    var nextStyle = style
+                    nextStyle.strong.toggle()
+                    out.append(parseInline(String(text[innerRange]), baseFont: baseFont, style: nextStyle, ctx: ctx))
+                    index = text.index(end, offsetBy: 2)
+                    literalStart = index
+                    continue
+                }
+            }
+
+            if ch == "*" || ch == "_" {
+                let innerStart = text.index(after: index)
+                if canOpenDelimiterRangeFirst(ch, count: 1, in: text, at: index, lowerBound: text.startIndex, upperBound: text.endIndex),
+                   let end = findClosingDelimiterRangeFirst(ch, count: 1, in: text, start: innerStart, lowerBound: text.startIndex, limit: text.endIndex)
+                {
+                    let innerRange = innerStart..<end
+                    if isValidInlineDelimitedContentRangeFirst(text, range: innerRange) {
+                        var nextStyle = style
+                        nextStyle.emphasis.toggle()
+                        out.append(parseInline(String(text[innerRange]), baseFont: baseFont, style: nextStyle, ctx: ctx))
+                        index = text.index(after: end)
+                        literalStart = index
+                        continue
+                    }
+                }
+            }
+
+            index = text.index(after: index)
         }
 
         flushLiteral(upTo: text.endIndex)
@@ -6199,6 +6633,148 @@ enum NativeMarkdownCodec {
         return nil
     }
 
+    private static func parseInlineMathRangeFirst(
+        _ text: String,
+        startIndex: String.Index,
+        baseFont: NSFont
+    ) -> RangeInlineParseResult? {
+        guard startIndex < text.endIndex, text[startIndex] == "$" else { return nil }
+        let expressionStart = text.index(after: startIndex)
+        guard expressionStart < text.endIndex else { return nil }
+
+        let next = text[expressionStart]
+        // Avoid interpreting currency as math (`$5`).
+        if next.isNumber || next.isWhitespace || next == "$" {
+            return nil
+        }
+
+        var index = expressionStart
+        var escaped = false
+        while index < text.endIndex {
+            let ch = text[index]
+            if escaped {
+                escaped = false
+                index = text.index(after: index)
+                continue
+            }
+            if ch == "\\" {
+                escaped = true
+                index = text.index(after: index)
+                continue
+            }
+            if ch == "$" {
+                let expressionRange = expressionStart..<index
+                let expression = String(text[expressionRange])
+                guard !expression.isEmpty else { return nil }
+                guard !expression.contains("\n") else { return nil }
+                guard !expression.hasPrefix(" "), !expression.hasSuffix(" ") else { return nil }
+                let nextIndex = text.index(after: index)
+                let source = String(text[startIndex..<nextIndex])
+                return RangeInlineParseResult(
+                    attributed: makeInlineMathAttributed(
+                        expression: expression,
+                        sourceMarkdown: source,
+                        baseFont: baseFont
+                    ),
+                    nextIndex: nextIndex
+                )
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func findClosingDelimiterRangeFirst(
+        _ marker: Character,
+        count: Int,
+        in text: String,
+        start: String.Index,
+        lowerBound: String.Index,
+        limit: String.Index
+    ) -> String.Index? {
+        guard count > 0, start < limit else { return nil }
+        var index = start
+        while index < limit {
+            if hasDelimiterRunRangeFirst(marker, count: count, in: text, at: index, limit: limit),
+               canCloseDelimiterRangeFirst(marker, count: count, in: text, at: index, lowerBound: lowerBound, upperBound: limit) {
+                return index
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func hasDelimiterRunRangeFirst(
+        _ marker: Character,
+        count: Int,
+        in text: String,
+        at index: String.Index,
+        limit: String.Index
+    ) -> Bool {
+        guard count > 0 else { return false }
+        var cursor = index
+        for _ in 0..<count {
+            guard cursor < limit, text[cursor] == marker else { return false }
+            cursor = text.index(after: cursor)
+        }
+        return true
+    }
+
+    private static func canOpenDelimiterRangeFirst(
+        _ marker: Character,
+        count: Int,
+        in text: String,
+        at index: String.Index,
+        lowerBound: String.Index,
+        upperBound: String.Index
+    ) -> Bool {
+        guard hasDelimiterRunRangeFirst(marker, count: count, in: text, at: index, limit: upperBound),
+              let afterRun = text.index(index, offsetBy: count, limitedBy: upperBound) else {
+            return false
+        }
+        let prev = index > lowerBound ? text[text.index(before: index)] : nil
+        let next = afterRun < upperBound ? text[afterRun] : nil
+        let leftFlanking = isLeftFlankingDelimiterRun(prev: prev, next: next)
+        guard leftFlanking else { return false }
+        if marker != "_" { return true }
+
+        let rightFlanking = isRightFlankingDelimiterRun(prev: prev, next: next)
+        return !rightFlanking || isPunctuation(prev)
+    }
+
+    private static func canCloseDelimiterRangeFirst(
+        _ marker: Character,
+        count: Int,
+        in text: String,
+        at index: String.Index,
+        lowerBound: String.Index,
+        upperBound: String.Index
+    ) -> Bool {
+        guard hasDelimiterRunRangeFirst(marker, count: count, in: text, at: index, limit: upperBound),
+              let afterRun = text.index(index, offsetBy: count, limitedBy: upperBound) else {
+            return false
+        }
+        let prev = index > lowerBound ? text[text.index(before: index)] : nil
+        let next = afterRun < upperBound ? text[afterRun] : nil
+        let rightFlanking = isRightFlankingDelimiterRun(prev: prev, next: next)
+        guard rightFlanking else { return false }
+        if marker != "_" { return true }
+
+        let leftFlanking = isLeftFlankingDelimiterRun(prev: prev, next: next)
+        return !leftFlanking || isPunctuation(next)
+    }
+
+    private static func isValidInlineDelimitedContentRangeFirst(
+        _ text: String,
+        range: Range<String.Index>
+    ) -> Bool {
+        guard !range.isEmpty else { return false }
+        let first = text[range.lowerBound]
+        let last = text[text.index(before: range.upperBound)]
+        if first.isWhitespace || last.isWhitespace { return false }
+        return true
+    }
+
     private static func parseImage(_ chars: [Character], startIndex: Int, limit: Int, ctx: ImportContext) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: Int)? {
         guard startIndex + 1 < limit, chars[startIndex] == "!", chars[startIndex + 1] == "[" else { return nil }
         guard let alt = parseBracketContent(chars, openIndex: startIndex + 1, limit: limit) else { return nil }
@@ -6221,6 +6797,40 @@ enum NativeMarkdownCodec {
             if let def = ctx.referenceDefinitions[refID.lowercased()] {
                 let source = materializeCharacters(chars, range: startIndex..<ref.nextIndex)
                 return (altText, def.destination, source, ref.nextIndex)
+            }
+        }
+
+        return nil
+    }
+
+    private static func parseImageRangeFirst(
+        _ text: String,
+        startIndex: String.Index,
+        ctx: ImportContext
+    ) -> (alt: String, destination: String, sourceMarkdown: String, nextIndex: String.Index)? {
+        guard startIndex < text.endIndex, text[startIndex] == "!" else { return nil }
+        let bracketStart = text.index(after: startIndex)
+        guard bracketStart < text.endIndex, text[bracketStart] == "[" else { return nil }
+        guard let alt = parseBracketContentRangeFirst(text, openIndex: bracketStart, limit: text.endIndex) else { return nil }
+        let altText = String(text[alt.contentRange])
+
+        // Inline destination: ![alt](url "title")
+        if alt.nextIndex < text.endIndex, text[alt.nextIndex] == "(",
+           let target = parseInlineLinkDestinationRangeFirst(text, openParenIndex: alt.nextIndex, limit: text.endIndex)
+        {
+            let destination = String(text[target.destinationRange])
+            let source = String(text[startIndex..<target.nextIndex])
+            return (altText, destination, source, target.nextIndex)
+        }
+
+        // Reference destination: ![alt][id]
+        if alt.nextIndex < text.endIndex, text[alt.nextIndex] == "[",
+           let ref = parseBracketContentRangeFirst(text, openIndex: alt.nextIndex, limit: text.endIndex)
+        {
+            let refID = ref.contentRange.isEmpty ? altText : String(text[ref.contentRange])
+            if let definition = ctx.referenceDefinitions[refID.lowercased()] {
+                let source = String(text[startIndex..<ref.nextIndex])
+                return (altText, definition.destination, source, ref.nextIndex)
             }
         }
 

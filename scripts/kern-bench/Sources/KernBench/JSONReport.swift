@@ -153,6 +153,11 @@ struct RunResult: Codable {
     let unattributedOpenBudgetMs: Double?
     let timeToStableLayoutMs: Double?
     let postReadyExportQuiescenceMs: Double?
+    var readinessSnapshotPrePath: String? = nil
+    var readinessSnapshotPreElapsedMs: Double? = nil
+    var readinessSnapshotPostPath: String? = nil
+    var readinessSnapshotPostElapsedMs: Double? = nil
+    var readinessSnapshotFailureReason: String? = nil
     let extraMetrics: [String: Double]?
 
     let runQuality: String
@@ -200,6 +205,11 @@ struct RunResult: Codable {
         case unattributedOpenBudgetMs = "unattributed_open_budget_ms"
         case timeToStableLayoutMs = "time_to_stable_layout_ms"
         case postReadyExportQuiescenceMs = "post_ready_export_quiescence_ms"
+        case readinessSnapshotPrePath = "readiness_snapshot_pre_path"
+        case readinessSnapshotPreElapsedMs = "readiness_snapshot_pre_elapsed_ms"
+        case readinessSnapshotPostPath = "readiness_snapshot_post_path"
+        case readinessSnapshotPostElapsedMs = "readiness_snapshot_post_elapsed_ms"
+        case readinessSnapshotFailureReason = "readiness_snapshot_failure_reason"
         case extraMetrics = "extra_metrics"
         case runQuality = "run_quality"
         case stageTimeoutCount = "stage_timeout_count"

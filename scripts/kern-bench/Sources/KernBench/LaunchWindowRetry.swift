@@ -54,6 +54,7 @@ func performLaunchWindowAttempts(
     deadlineReason: @MainActor @escaping () -> String,
     config: BenchConfig,
     zedBenchHookSignalPath: String?,
+    textKitBenchSignalPath: String? = nil,
     dependencies: LaunchWindowRetryDependencies = .init()
 ) async -> LaunchWindowRetryOutcome {
     var launchResult: LaunchResult?
@@ -70,17 +71,33 @@ func performLaunchWindowAttempts(
             "--bench-ready-mode", config.zedBenchReadyMode,
         ]
     }()
+    let textKitBenchMode = config.suiteID == .benchmarkFullFidelity
+        ? "textkit_full_layout"
+        : "textkit_text_assigned"
+    let textKitHookArgs: [String] = {
+        guard let textKitBenchSignalPath else { return [] }
+        return [
+            "--bench-target-file", runFile,
+            "--bench-ready-signal", textKitBenchSignalPath,
+            "--bench-ready-mode", textKitBenchMode,
+        ]
+    }()
 
     func launchArgs(forAttempt attempt: Int) -> [String] {
-        guard editor.displayName == "Zed", !zedHookArgs.isEmpty else { return [] }
-        switch config.zedBenchHookMode {
-        case .required:
-            return zedHookArgs
-        case .auto:
-            return attempt == 1 ? zedHookArgs : []
-        case .off:
-            return []
+        if editor.displayName == "Zed", !zedHookArgs.isEmpty {
+            switch config.zedBenchHookMode {
+            case .required:
+                return zedHookArgs
+            case .auto:
+                return attempt == 1 ? zedHookArgs : []
+            case .off:
+                return []
+            }
         }
+        if editor.displayName == "TextKit Baseline", !textKitHookArgs.isEmpty {
+            return textKitHookArgs
+        }
+        return []
     }
 
     attemptLoop: for attempt in 1...2 {
@@ -88,7 +105,7 @@ func performLaunchWindowAttempts(
         dependencies.log("  [\(editor.displayName)] run \(runIdx): launch\(retryTag)")
 
         let perAttemptLaunchArgs = launchArgs(forAttempt: attempt)
-        launchedWithZedBenchHook = !perAttemptLaunchArgs.isEmpty
+        launchedWithZedBenchHook = editor.displayName == "Zed" && !perAttemptLaunchArgs.isEmpty
         guard let candidate = try? await launcher.launch(
             file: runFile,
             env: launchEnv,

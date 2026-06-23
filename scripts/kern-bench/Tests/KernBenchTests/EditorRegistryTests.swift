@@ -50,4 +50,31 @@ final class EditorRegistryTests: XCTestCase {
 
         XCTAssertEqual(resolved, workspaceURL)
     }
+
+    func testResolveTextKitBenchEditorPrefersExplicitOverride() {
+        let resolved = resolveTextKitBenchEditorCommand(
+            environment: ["KERN_BENCH_TEXTKIT_EDITOR": "/tmp/TextKitBenchEditor"],
+            currentDirectoryPath: "/tmp/irrelevant",
+            isExecutable: { path in
+                path == "/tmp/TextKitBenchEditor"
+            }
+        )
+
+        XCTAssertEqual(resolved, ["/tmp/TextKitBenchEditor"])
+    }
+
+    func testResolveTextKitBenchEditorFindsRepoBuildProduct() {
+        let resolved = resolveTextKitBenchEditorCommand(
+            environment: [:],
+            currentDirectoryPath: "/Users/tester/Projects/Kern-textkit",
+            isExecutable: { path in
+                path == "/Users/tester/Projects/Kern-textkit/scripts/kern-bench/.build/release/TextKitBenchEditor"
+            }
+        )
+
+        XCTAssertEqual(
+            resolved,
+            ["/Users/tester/Projects/Kern-textkit/scripts/kern-bench/.build/release/TextKitBenchEditor"]
+        )
+    }
 }

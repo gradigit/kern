@@ -53,6 +53,15 @@ let requiredRosterV1: [EditorDefinition] = [
 
 /// Optional editors available for exploratory comparisons only (not part of official roster claims).
 let optionalEditors: [EditorDefinition] = [
+    .init(displayName: "TextKit Baseline", appName: "TextKitBenchEditor",
+          bundleIdentifier: "com.gradigit.kern-bench.TextKitBenchEditor",
+          processName: "TextKitBenchEditor",
+          architecture: "Native AppKit + TextKit plain NSTextView",
+          isElectron: false,
+          cliLaunchCommand: ["TextKitBenchEditor"],
+          cleanLaunchArgs: [],
+          helperProcessPrefix: nil,
+          requiredForOfficial: false),
     .init(displayName: "Typora", appName: "Typora",
           bundleIdentifier: "abnerworks.Typora", processName: "Typora",
           architecture: "Native (WebKit hybrid)", isElectron: false,
@@ -123,6 +132,10 @@ func isEditorInstalled(_ editor: EditorDefinition) -> Bool {
     if editor.displayName == "Kern", resolveKernAppURL() != nil {
         return true
     }
+    if editor.displayName == "TextKit Baseline",
+       resolveTextKitBenchEditorCommand()?.first != nil {
+        return true
+    }
     if NSWorkspace.shared.urlForApplication(withBundleIdentifier: editor.bundleIdentifier) != nil {
         return true
     }
@@ -132,6 +145,43 @@ func isEditorInstalled(_ editor: EditorDefinition) -> Bool {
         NSHomeDirectory() + "/Applications/\(editor.appName).app",
     ]
     return paths.contains { FileManager.default.fileExists(atPath: $0) }
+}
+
+func defaultTextKitBenchEditorCandidates(
+    currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+) -> [String] {
+    let cwd = URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
+    let candidates = [
+        cwd.appendingPathComponent("scripts/kern-bench/.build/release/TextKitBenchEditor").standardizedFileURL.path,
+        cwd.appendingPathComponent("scripts/kern-bench/.build/debug/TextKitBenchEditor").standardizedFileURL.path,
+        cwd.appendingPathComponent(".build/release/TextKitBenchEditor").standardizedFileURL.path,
+        cwd.appendingPathComponent(".build/debug/TextKitBenchEditor").standardizedFileURL.path,
+        cwd.appendingPathComponent("../.build/release/TextKitBenchEditor").standardizedFileURL.path,
+        cwd.appendingPathComponent("../.build/debug/TextKitBenchEditor").standardizedFileURL.path,
+    ]
+
+    var seen = Set<String>()
+    return candidates.filter { seen.insert($0).inserted }
+}
+
+func resolveTextKitBenchEditorCommand(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    currentDirectoryPath: String = FileManager.default.currentDirectoryPath,
+    isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+) -> [String]? {
+    if let overrideRaw = environment["KERN_BENCH_TEXTKIT_EDITOR"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+       !overrideRaw.isEmpty {
+        let expanded = (overrideRaw as NSString).expandingTildeInPath
+        return isExecutable(expanded) ? [expanded] : nil
+    }
+
+    for candidate in defaultTextKitBenchEditorCandidates(currentDirectoryPath: currentDirectoryPath)
+        where isExecutable(candidate) {
+        return [candidate]
+    }
+
+    return nil
 }
 
 func detectInstalledEditors() -> [EditorDefinition] {

@@ -260,6 +260,9 @@ func benchmarkCleanLaunchArgs(
               createPrivateBenchmarkDirectory(at: dir, ownerValidator: effectiveOwnerValidator) else {
             return nil
         }
+        guard seedBenchmarkProfileIfNeeded(for: editor, profileDirectory: dir) else {
+            return nil
+        }
         return dir
     }
 
@@ -285,6 +288,40 @@ func benchmarkCleanLaunchArgs(
     return args
 }
 
+@discardableResult
+private func seedBenchmarkProfileIfNeeded(for editor: EditorDefinition, profileDirectory: URL) -> Bool {
+    guard editor.displayName == "Zed" else { return true }
+
+    // Zed auto-installs the HTML extension for fresh profiles by default. The large
+    // Markdown benchmark fixture intentionally contains HTML syntax cases, which can
+    // otherwise trigger background extension installation/network work during a
+    // measured run. Disable that auto-install in the isolated benchmark profile so
+    // the suite measures file load/readiness rather than first-run extension setup.
+    let configDirectory = profileDirectory.appendingPathComponent("config", isDirectory: true)
+    do {
+        try FileManager.default.createDirectory(
+            at: configDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let settings = """
+        {
+          "auto_install_extensions": {
+            "html": false
+          }
+        }
+        """
+        try settings.write(
+            to: configDirectory.appendingPathComponent("settings.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return true
+    } catch {
+        return false
+    }
+}
+
 struct EditorLauncher {
     let editor: EditorDefinition
 
@@ -305,6 +342,9 @@ struct EditorLauncher {
     private var effectiveCLILaunchCommand: [String]? {
         if let zedCLIResolution {
             return zedCLIResolution.command
+        }
+        if editor.displayName == "TextKit Baseline" {
+            return resolveTextKitBenchEditorCommand()
         }
         return editor.cliLaunchCommand
     }
@@ -476,6 +516,12 @@ struct EditorLauncher {
         // Capture t0 immediately before exec — this is the true launch timestamp.
         let launchNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try proc.run()
+
+        if editor.displayName == "TextKit Baseline" {
+            let pid = proc.processIdentifier
+            trackOwnedBenchmarkPIDs([pid], for: editor)
+            return LaunchResult(pid: pid, launchNs: launchNs)
+        }
 
         // Poll for PID registration with retry (up to pidLookupTimeout).
         let pid = try await waitForPID()

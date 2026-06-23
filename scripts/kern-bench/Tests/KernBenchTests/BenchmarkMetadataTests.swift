@@ -27,6 +27,31 @@ final class BenchmarkMetadataTests: XCTestCase {
         XCTAssertEqual(overrides?.count, 3)
     }
 
+    func testAppLaunchEnvironmentPassesKernMetricsAndInjectedOverridesOnlyToKern() {
+        let overrides = [
+            "KERN_STAGED_PROMOTION_VIEWPORT_MICRO_STEP_CHARS": "2000000",
+            "KERN_WOW_STAGED_PROMOTION_PHASE_PROFILE": "1",
+        ]
+
+        let kernEnv = appLaunchEnvironment(
+            editorDisplayName: "Kern",
+            wowMetricsPath: "/tmp/metrics.json",
+            injectedOverrides: overrides
+        )
+
+        XCTAssertEqual(kernEnv["KERN_WOW_INTERNAL_METRICS_PATH"], "/tmp/metrics.json")
+        XCTAssertEqual(kernEnv["KERN_STAGED_PROMOTION_VIEWPORT_MICRO_STEP_CHARS"], "2000000")
+        XCTAssertEqual(kernEnv["KERN_WOW_STAGED_PROMOTION_PHASE_PROFILE"], "1")
+
+        let zedEnv = appLaunchEnvironment(
+            editorDisplayName: "Zed",
+            wowMetricsPath: "/tmp/metrics.json",
+            injectedOverrides: overrides
+        )
+
+        XCTAssertTrue(zedEnv.isEmpty)
+    }
+
     func testBenchmarkConfigEncodesArchiveMetadataFields() throws {
         let config = BenchmarkConfig(
             suite: "benchmark_full_fidelity",
