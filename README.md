@@ -193,6 +193,34 @@ Maintainer-facing release publication steps live in [the GitHub release checklis
 
 Signed/notarized macOS distribution is not published from this repository.
 
+## Benchmark and Evaluation Packets
+
+For benchmark-harness changes, use the packet mode so the run keeps the raw log,
+command, preflight metadata, process snapshots, summary JSON, markdown summary,
+and readiness-capture directory together unless screen capture is disabled:
+
+```bash
+./scripts/cross-editor-benchmark.sh \
+  --suite benchmark_open_ready \
+  --editors "TextKit Baseline" \
+  --artifact-dir benchmark-archive/cross-editor-preflight/local-preflight \
+  --preflight-only
+```
+
+For real cross-editor runs, use `--artifact-dir` with the normal editor roster.
+Artifact mode validates the emitted JSON by default and fails if the run is
+partial, missing required metrics, malformed, or missing fixture identity data.
+Use `--allow-partial-artifacts` only for diagnostic packets that should not be
+used for README, release, or social-performance claims.
+
+Compare baseline and candidate packets with:
+
+```bash
+python3 scripts/bench-regression-check.py \
+  --baseline benchmark-archive/baseline/metrics-summary.json \
+  --latest benchmark-archive/candidate/metrics-summary.json
+```
+
 ## Useful Docs
 
 - [Kern Markdown dialect](KERN-MARKDOWN.md)
