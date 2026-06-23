@@ -12,6 +12,12 @@ STARTUP_PROBES=""
 MODE="warm"
 JSON_PATH=""
 MARKDOWN_PATH=""
+ARTIFACT_DIR=""
+PREFLIGHT_JSON_PATH=""
+LOG_PATH=""
+COMMAND_PATH=""
+PROCESS_SNAPSHOT_BEFORE_PATH=""
+PROCESS_SNAPSHOT_AFTER_PATH=""
 EDITORS_FILTER=""
 EDITOR_ARGS=()
 EXPLICIT_ALL=false
@@ -29,6 +35,8 @@ KERN_OPEN_METRIC_SOURCE=""
 ZED_BENCH_HOOK=""
 ZED_READY_MODE=""
 READINESS_CAPTURE_DIR=""
+STRICT_ARTIFACTS=false
+ALLOW_PARTIAL_ARTIFACTS=false
 SELECTED_EDITORS=()
 USES_ALL_EDITORS=false
 NEEDS_ZED=false
@@ -449,6 +457,135 @@ cleanup_editors() {
   kill_owned_cleanup_pids
 }
 
+write_command_artifact() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  mkdir -p "$(dirname "$path")"
+  {
+    printf 'cwd=%s\n' "$(pwd)"
+    printf 'command='
+    printf ' %q' "${CMD[@]}"
+    printf '\n'
+  } > "$path"
+}
+
+write_process_snapshot() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  mkdir -p "$(dirname "$path")"
+  {
+    printf 'timestamp=%s\n' "$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'cleanup_targets:\n'
+    local any=false
+    local entry
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] || continue
+      any=true
+      printf '  %s\n' "$entry"
+    done < <(list_running_cleanup_targets)
+    if [[ "$any" == false ]]; then
+      printf '  <none>\n'
+    fi
+  } > "$path"
+}
+
+write_preflight_json() {
+  local path="$1"
+  [[ -n "$path" ]] || return 0
+  mkdir -p "$(dirname "$path")"
+
+  local command_text
+  command_text="$(printf ' %q' "${CMD[@]}")"
+
+  local selected_editors_text=""
+  if [[ "$USES_ALL_EDITORS" == true ]]; then
+    selected_editors_text="ALL"
+  elif ((${#SELECTED_EDITORS[@]} > 0)); then
+    selected_editors_text="$(IFS=','; printf '%s' "${SELECTED_EDITORS[*]}")"
+  fi
+
+  local cleanup_apps cleanup_processes cleanup_bundle_ids cleanup_paths
+  cleanup_apps="$(IFS=','; printf '%s' "${CLEANUP_APP_NAMES[*]:-}")"
+  cleanup_processes="$(IFS=','; printf '%s' "${CLEANUP_PROCESS_NAMES[*]:-}")"
+  cleanup_bundle_ids="$(IFS=','; printf '%s' "${CLEANUP_BUNDLE_IDS[*]:-}")"
+  cleanup_paths="$(IFS=','; printf '%s' "${CLEANUP_FULL_PATHS[*]:-}")"
+
+  local git_commit
+  git_commit="$(git rev-parse HEAD 2>/dev/null || true)"
+
+  KERN_CROSS_PREFLIGHT_GIT_COMMIT="$git_commit" \
+  KERN_CROSS_PREFLIGHT_SUITE="$SUITE" \
+  KERN_CROSS_PREFLIGHT_FILE="$FILE" \
+  KERN_CROSS_PREFLIGHT_MODE="$MODE" \
+  KERN_CROSS_PREFLIGHT_PREFLIGHT_ONLY="$PREFLIGHT_ONLY" \
+  KERN_CROSS_PREFLIGHT_SELECTED_EDITORS="$selected_editors_text" \
+  KERN_CROSS_PREFLIGHT_NEEDS_KERN="$NEEDS_KERN" \
+  KERN_CROSS_PREFLIGHT_NEEDS_ZED="$NEEDS_ZED" \
+  KERN_CROSS_PREFLIGHT_KERN_APP_SOURCE="$KERN_APP_SOURCE" \
+  KERN_CROSS_PREFLIGHT_ZED_CLI_SOURCE="$ZED_CLI_SOURCE" \
+  KERN_CROSS_PREFLIGHT_BENCHMARK_BINARY="$KERN_BENCH_BIN" \
+  KERN_CROSS_PREFLIGHT_ARTIFACT_DIR="$ARTIFACT_DIR" \
+  KERN_CROSS_PREFLIGHT_JSON_PATH="$JSON_PATH" \
+  KERN_CROSS_PREFLIGHT_MARKDOWN_PATH="$MARKDOWN_PATH" \
+  KERN_CROSS_PREFLIGHT_LOG_PATH="$LOG_PATH" \
+  KERN_CROSS_PREFLIGHT_READINESS_CAPTURE_DIR="$READINESS_CAPTURE_DIR" \
+  KERN_CROSS_PREFLIGHT_STRICT_ARTIFACTS="$STRICT_ARTIFACTS" \
+  KERN_CROSS_PREFLIGHT_ALLOW_PARTIAL_ARTIFACTS="$ALLOW_PARTIAL_ARTIFACTS" \
+  KERN_CROSS_PREFLIGHT_CLEANUP_APPS="$cleanup_apps" \
+  KERN_CROSS_PREFLIGHT_CLEANUP_PROCESSES="$cleanup_processes" \
+  KERN_CROSS_PREFLIGHT_CLEANUP_BUNDLE_IDS="$cleanup_bundle_ids" \
+  KERN_CROSS_PREFLIGHT_CLEANUP_PATHS="$cleanup_paths" \
+  KERN_CROSS_PREFLIGHT_COMMAND="$command_text" \
+  python3 - "$path" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+def split_csv(value):
+    return [item for item in value.split(",") if item]
+
+def flag(name):
+    return os.environ.get(name, "false") == "true"
+
+payload = {
+    "schema_version": 1,
+    "tool": "cross-editor-benchmark.sh",
+    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "git_commit": os.environ.get("KERN_CROSS_PREFLIGHT_GIT_COMMIT", ""),
+    "suite": os.environ.get("KERN_CROSS_PREFLIGHT_SUITE", ""),
+    "file": os.environ.get("KERN_CROSS_PREFLIGHT_FILE", ""),
+    "mode": os.environ.get("KERN_CROSS_PREFLIGHT_MODE", ""),
+    "preflight_only": flag("KERN_CROSS_PREFLIGHT_PREFLIGHT_ONLY"),
+    "selected_editors": os.environ.get("KERN_CROSS_PREFLIGHT_SELECTED_EDITORS", ""),
+    "needs_kern": flag("KERN_CROSS_PREFLIGHT_NEEDS_KERN"),
+    "needs_zed": flag("KERN_CROSS_PREFLIGHT_NEEDS_ZED"),
+    "kern_app": os.environ.get("KERN_BENCH_KERN_APP"),
+    "kern_app_source": os.environ.get("KERN_CROSS_PREFLIGHT_KERN_APP_SOURCE", ""),
+    "zed_cli": os.environ.get("KERN_BENCH_ZED_CLI"),
+    "zed_cli_source": os.environ.get("KERN_CROSS_PREFLIGHT_ZED_CLI_SOURCE", ""),
+    "benchmark_binary": os.environ.get("KERN_CROSS_PREFLIGHT_BENCHMARK_BINARY", ""),
+    "artifact_dir": os.environ.get("KERN_CROSS_PREFLIGHT_ARTIFACT_DIR", ""),
+    "json_path": os.environ.get("KERN_CROSS_PREFLIGHT_JSON_PATH", ""),
+    "markdown_path": os.environ.get("KERN_CROSS_PREFLIGHT_MARKDOWN_PATH", ""),
+    "log_path": os.environ.get("KERN_CROSS_PREFLIGHT_LOG_PATH", ""),
+    "readiness_capture_dir": os.environ.get("KERN_CROSS_PREFLIGHT_READINESS_CAPTURE_DIR", ""),
+    "strict_artifacts": flag("KERN_CROSS_PREFLIGHT_STRICT_ARTIFACTS"),
+    "allow_partial_artifacts": flag("KERN_CROSS_PREFLIGHT_ALLOW_PARTIAL_ARTIFACTS"),
+    "cleanup_targets": {
+        "apps": split_csv(os.environ.get("KERN_CROSS_PREFLIGHT_CLEANUP_APPS", "")),
+        "processes": split_csv(os.environ.get("KERN_CROSS_PREFLIGHT_CLEANUP_PROCESSES", "")),
+        "bundle_ids": split_csv(os.environ.get("KERN_CROSS_PREFLIGHT_CLEANUP_BUNDLE_IDS", "")),
+        "full_paths": split_csv(os.environ.get("KERN_CROSS_PREFLIGHT_CLEANUP_PATHS", "")),
+    },
+    "command": os.environ.get("KERN_CROSS_PREFLIGHT_COMMAND", "").strip(),
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
 expand_tilde_path() {
   local path="$1"
   if [[ "$path" == "~"* ]]; then
@@ -568,6 +705,11 @@ while [[ $# -gt 0 ]]; do
     --warm) MODE="warm"; shift ;;
     --json) JSON_PATH="$2"; shift 2 ;;
     --markdown) MARKDOWN_PATH="$2"; shift 2 ;;
+    --artifact-dir) ARTIFACT_DIR="$2"; shift 2 ;;
+    --preflight-json) PREFLIGHT_JSON_PATH="$2"; shift 2 ;;
+    --log) LOG_PATH="$2"; shift 2 ;;
+    --strict-artifacts) STRICT_ARTIFACTS=true; shift ;;
+    --allow-partial-artifacts) ALLOW_PARTIAL_ARTIFACTS=true; shift ;;
     --runs) RUNS="$2"; shift 2 ;;
     --warmup-runs) WARMUP_RUNS="$2"; shift 2 ;;
     --startup-probes) STARTUP_PROBES="$2"; shift 2 ;;
@@ -605,6 +747,15 @@ Options:
   --all                 Benchmark all installed roster editors (default behavior)
   --json PATH           Write JSON report
   --markdown PATH       Write markdown report
+  --artifact-dir PATH   Write a benchmark packet: raw log, JSON, markdown,
+                        preflight manifest, command, process snapshots,
+                        and readiness capture directory
+  --preflight-json PATH Write wrapper preflight metadata JSON
+  --log PATH            Tee wrapper and kern-bench output to a raw log
+  --strict-artifacts    After kern-bench succeeds, fail if JSON artifacts are
+                        partial, missing required metrics, or malformed
+  --allow-partial-artifacts
+                        Allow partial JSON artifacts in strict artifact mode
   --editors LIST        Comma-separated roster editor names
   --timeout SEC         Per-stage timeout
   --run-timeout SEC     Per editor-run timeout budget
@@ -635,6 +786,7 @@ Policy:
   - single-editor or non-Kern+Zed aside runs are diagnostic-only and do not qualify as OFFICIAL head-to-head claim evidence
   - Any run that includes Zed enforces the forked Zed CLI (auto-detected or KERN_BENCH_ZED_CLI)
   - Partial runs are not eligible for README/social headline claims
+  - --artifact-dir enables strict artifact validation by default
 EOF
       exit 0
       ;;
@@ -655,6 +807,25 @@ EOF
       ;;
   esac
 done
+
+if [[ -n "$ARTIFACT_DIR" ]]; then
+  mkdir -p "$ARTIFACT_DIR"
+  if [[ -z "$JSON_PATH" ]]; then JSON_PATH="$ARTIFACT_DIR/metrics-summary.json"; fi
+  if [[ -z "$MARKDOWN_PATH" ]]; then MARKDOWN_PATH="$ARTIFACT_DIR/summary.md"; fi
+  if [[ -z "$PREFLIGHT_JSON_PATH" ]]; then PREFLIGHT_JSON_PATH="$ARTIFACT_DIR/preflight.json"; fi
+  if [[ -z "$LOG_PATH" ]]; then LOG_PATH="$ARTIFACT_DIR/raw.log"; fi
+  if [[ -z "$COMMAND_PATH" ]]; then COMMAND_PATH="$ARTIFACT_DIR/command.txt"; fi
+  if [[ -z "$PROCESS_SNAPSHOT_BEFORE_PATH" ]]; then PROCESS_SNAPSHOT_BEFORE_PATH="$ARTIFACT_DIR/process-snapshot-before.txt"; fi
+  if [[ -z "$PROCESS_SNAPSHOT_AFTER_PATH" ]]; then PROCESS_SNAPSHOT_AFTER_PATH="$ARTIFACT_DIR/process-snapshot-after.txt"; fi
+  if [[ -z "$READINESS_CAPTURE_DIR" && "$NO_SCREENCAPTURE" != true ]]; then READINESS_CAPTURE_DIR="$ARTIFACT_DIR/readiness"; fi
+  STRICT_ARTIFACTS=true
+fi
+
+if [[ -n "$LOG_PATH" ]]; then
+  mkdir -p "$(dirname "$LOG_PATH")"
+  : > "$LOG_PATH"
+  exec > >(tee -a "$LOG_PATH") 2>&1
+fi
 
 case "$SUITE" in
   benchmark|bench)
@@ -692,9 +863,14 @@ if [[ ! -f "$FILE" ]]; then
   exit 1
 fi
 
-KERN_BENCH_BIN="scripts/kern-bench/.build/release/kern-bench"
+KERN_BENCH_BIN="${KERN_BENCH_BIN:-scripts/kern-bench/.build/release/kern-bench}"
 NEEDS_KERN_BENCH_BUILD=false
-if [[ ! -x "$KERN_BENCH_BIN" ]]; then
+if [[ -n "${KERN_BENCH_BIN:-}" && "$KERN_BENCH_BIN" != "scripts/kern-bench/.build/release/kern-bench" ]]; then
+  if [[ ! -x "$KERN_BENCH_BIN" ]]; then
+    echo "Error: KERN_BENCH_BIN is set but not executable: $KERN_BENCH_BIN" >&2
+    exit 1
+  fi
+elif [[ ! -x "$KERN_BENCH_BIN" ]]; then
   NEEDS_KERN_BENCH_BUILD=true
 elif [[ "scripts/kern-bench/Package.swift" -nt "$KERN_BENCH_BIN" ]]; then
   NEEDS_KERN_BENCH_BUILD=true
@@ -879,6 +1055,9 @@ if [[ "$NEEDS_ZED" == true ]]; then
 fi
 
 build_cleanup_targets
+write_command_artifact "$COMMAND_PATH"
+write_process_snapshot "$PROCESS_SNAPSHOT_BEFORE_PATH"
+write_preflight_json "$PREFLIGHT_JSON_PATH"
 ensure_cleanup_targets_idle
 
 if [[ "$PREFLIGHT_ONLY" == true ]]; then
@@ -902,6 +1081,9 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
     echo "Kern app: unresolved (kern-bench registry fallback will decide at runtime)"
   fi
   echo "Cleanup targets: idle"
+  if [[ -n "$ARTIFACT_DIR" ]]; then
+    echo "Artifact dir: $ARTIFACT_DIR"
+  fi
   echo "Policy: suite-specific roster/classification policy enforced"
   echo "Claims: README/social headline claims require Official runs"
   if [[ "$SUITE" == "benchmark_open_ready" || "$SUITE" == "benchmark_full_fidelity" ]]; then
@@ -919,7 +1101,20 @@ fi
 record_cleanup_baseline_pids
 start_cleanup_reaper
 
-trap cleanup_editors INT TERM ERR
+BENCHMARK_CLEANED_UP=false
+cleanup_after_benchmark() {
+  if [[ "$BENCHMARK_CLEANED_UP" == true ]]; then
+    return 0
+  fi
+  BENCHMARK_CLEANED_UP=true
+  if ((${#CLEANUP_FULL_PATHS[@]} > 0)); then
+    capture_owned_cleanup_pids
+  fi
+  cleanup_editors
+  write_process_snapshot "$PROCESS_SNAPSHOT_AFTER_PATH"
+}
+
+trap cleanup_after_benchmark INT TERM ERR EXIT
 
 echo "=== Cross-Editor Benchmark Wrapper ==="
 echo "Suite: $SUITE"
@@ -946,6 +1141,9 @@ fi
 if [[ -n "$BENCH_PROFILE" ]]; then
   echo "Profile: $BENCH_PROFILE"
 fi
+if [[ -n "$ARTIFACT_DIR" ]]; then
+  echo "Artifact dir: $ARTIFACT_DIR"
+fi
 echo ""
 
 set +e
@@ -953,9 +1151,22 @@ set +e
 status=$?
 set -e
 
-if ((${#CLEANUP_FULL_PATHS[@]} > 0)); then
-  capture_owned_cleanup_pids
-  cleanup_editors
+cleanup_after_benchmark
+
+if [[ "$status" -eq 0 && "$STRICT_ARTIFACTS" == true ]]; then
+  VALIDATE_CMD=(python3 scripts/validate-benchmark-artifact.py --results "$JSON_PATH")
+  if [[ "$ALLOW_PARTIAL_ARTIFACTS" == true ]]; then
+    VALIDATE_CMD+=(--allow-partial)
+  fi
+  set +e
+  "${VALIDATE_CMD[@]}"
+  validate_status=$?
+  set -e
+  if [[ "$validate_status" -ne 0 ]]; then
+    echo "Benchmark artifact validation failed." >&2
+    status="$validate_status"
+  fi
 fi
 
+trap - INT TERM ERR EXIT
 exit "$status"
