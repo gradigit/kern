@@ -3,11 +3,11 @@ import XCTest
 
 final class NativeMarkdownCodecCalloutTests: XCTestCase {
     func testBlockquoteCalloutHidesMarkerAndRoundTrips() {
-        let markdown = "> [!NOTE] API key allowlist status\n> Status: `5.60.133.248/29` has been added."
+        let markdown = "> [!NOTE] Example allowlist status\n> Status: `203.0.113.0/29` has been added."
         let attr = NativeMarkdownCodec.importMarkdown(markdown)
 
         XCTAssertFalse(attr.string.contains("[!NOTE]"), "WYSIWYG import should hide callout marker syntax")
-        XCTAssertTrue(attr.string.contains("API key allowlist status"))
+        XCTAssertTrue(attr.string.contains("Example allowlist status"))
 
         guard attr.length > 0 else {
             XCTFail("Expected attributed callout content")
@@ -35,9 +35,9 @@ final class NativeMarkdownCodecCalloutTests: XCTestCase {
     }
 
     func testPortableAndLintExportDropCalloutMarkerButKeepBlockquoteText() {
-        let markdown = "> [!NOTE] API key allowlist status\n> Status: `5.60.133.248/29` has been added."
+        let markdown = "> [!NOTE] Example allowlist status\n> Status: `203.0.113.0/29` has been added."
         let attr = NativeMarkdownCodec.importMarkdown(markdown)
-        let expected = "> API key allowlist status\n> Status: `5.60.133.248/29` has been added."
+        let expected = "> Example allowlist status\n> Status: `203.0.113.0/29` has been added."
 
         var portable = NativeMarkdownCodec.Options()
         portable.exportDialect = .gfm

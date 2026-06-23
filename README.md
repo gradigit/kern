@@ -79,7 +79,7 @@ kern() { open -a Kern "$@"; }
 
 ## Install From a GitHub Release
 
-Latest release: [`v0.1.2`](https://github.com/kerneditor/kern/releases/tag/v0.1.2).
+Latest release: [`v0.1.2`](https://github.com/gradigit/kern/releases/tag/v0.1.2).
 
 When a tagged release includes binary assets, download:
 

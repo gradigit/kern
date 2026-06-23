@@ -7,7 +7,7 @@ A fully native macOS WYSIWYG Markdown editor built with Swift, AppKit, and TextK
 
 ## WYSIWYG editing
 
-Kern keeps Markdown semantics visible through rich native text: **bold**, *italic*, ~~completed text~~, `inline code`, [links](https://github.com/kerneditor/kern), and local images all edit in place.
+Kern keeps Markdown semantics visible through rich native text: **bold**, *italic*, ~~completed text~~, `inline code`, [links](https://github.com/gradigit/kern), and local images all edit in place.
 
 - [ ] Draft release notes
 - [x] Verify checksum sidecar

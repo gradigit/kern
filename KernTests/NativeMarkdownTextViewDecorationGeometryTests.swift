@@ -24,7 +24,7 @@ final class NativeMarkdownTextViewDecorationGeometryTests: XCTestCase {
     }
 
     func testCalloutGroupCoversMultiLineCalloutAndStopsBeforeOrdinaryQuote() {
-        let markdown = "> [!NOTE] API key allowlist status\n> Body line\n\n> ordinary quote\n"
+        let markdown = "> [!NOTE] Example allowlist status\n> Body line\n\n> ordinary quote\n"
         let textView = makeTextView(markdown: markdown)
         guard let storage = textView.textStorage else {
             XCTFail("Expected text storage")
@@ -32,7 +32,7 @@ final class NativeMarkdownTextViewDecorationGeometryTests: XCTestCase {
         }
 
         let ns = storage.string as NSString
-        let titleRange = ns.range(of: "API key allowlist status")
+        let titleRange = ns.range(of: "Example allowlist status")
         let bodyRange = ns.range(of: "Body line")
         let ordinaryRange = ns.range(of: "ordinary quote")
         XCTAssertNotEqual(titleRange.location, NSNotFound)

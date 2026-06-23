@@ -6,7 +6,7 @@ For non-security support, use [SUPPORT.md](SUPPORT.md) instead of this path.
 
 Use **GitHub private vulnerability reporting** for sensitive security issues in this repository:
 
-- `https://github.com/kerneditor/kern/security/advisories/new`
+- `https://github.com/gradigit/kern/security/advisories/new`
 
 Do **not** open a public issue for an undisclosed vulnerability.
 
