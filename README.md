@@ -79,7 +79,7 @@ kern() { open -a Kern "$@"; }
 
 ## Install From a GitHub Release
 
-Latest release: [`v0.1.2`](https://github.com/gradigit/kern/releases/tag/v0.1.2).
+Latest release: [`v0.1.3`](https://github.com/gradigit/kern/releases/tag/v0.1.3).
 
 When a tagged release includes binary assets, download:
 
@@ -238,5 +238,5 @@ For review requests, include failing/passing test evidence and any snapshot or U
 - This repository is a public source project.
 - Tagged releases may include an unsigned DMG plus checksum; signed/notarized macOS distribution is not published from this repository.
 - This repository is licensed under **Apache-2.0**.
-- Latest public release: `v0.1.2`.
+- Latest public release: `v0.1.3`.
 - Full-fidelity benchmark work remains deferred.
